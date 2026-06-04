@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a2a3a"/>
+      <stop offset="50%" stop-color="#0f1f2f"/>
+      <stop offset="100%" stop-color="#0a1520"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="round">
+      <rect x="0" y="0" width="512" height="512" rx="108" ry="108"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#round)">
+    <!-- 背景 -->
+    <rect width="512" height="512" fill="url(#bg)"/>
+    <circle cx="256" cy="236" r="220" fill="#10b981" opacity="0.035"/>
+
+    <!-- 左侧噪声波形 3条 -->
+    <g opacity="0.35">
+      <path d="M20 140 Q70 90 120 140 Q170 190 220 140 Q250 110 270 140"
+            fill="none" stroke="#ff4444" stroke-width="14" stroke-linecap="round"/>
+      <path d="M30 230 Q80 180 130 230 Q180 280 230 230 Q260 200 280 230"
+            fill="none" stroke="#ff4444" stroke-width="12" stroke-linecap="round"/>
+      <path d="M38 320 Q85 276 132 320 Q179 364 226 320 Q258 292 282 320"
+            fill="none" stroke="#ff4444" stroke-width="10" stroke-linecap="round"/>
+    </g>
+
+    <!-- 右侧干净波形 3条 -->
+    <g filter="url(#glow)" opacity="0.85">
+      <path d="M248 140 Q290 112 332 140 Q374 168 416 140 Q448 118 478 140"
+            fill="none" stroke="#10b981" stroke-width="12" stroke-linecap="round"/>
+      <path d="M240 230 Q285 206 330 230 Q375 254 420 230 Q455 210 486 230"
+            fill="none" stroke="#10b981" stroke-width="10" stroke-linecap="round"/>
+      <path d="M246 320 Q285 300 324 320 Q363 340 402 320 Q435 304 466 320"
+            fill="none" stroke="#10b981" stroke-width="8" stroke-linecap="round"/>
+    </g>
+
+    <!-- 中间分割线 -->
+    <line x1="256" y1="70" x2="256" y2="440" stroke="#10b981" stroke-opacity="0.08" stroke-width="2" stroke-dasharray="6,10"/>
+
+    <!-- 麦克风：更大 + 底座不透明 -->
+    <g transform="translate(256, 228)" filter="url(#glow)">
+      <!-- 胶囊形麦克风头 -->
+      <rect x="-58" y="-165" width="116" height="218" rx="58" ry="58"
+            fill="#10b981"/>
+
+      <!-- 网纹 -->
+      <line x1="-30" y1="-126" x2="30" y2="-126" stroke="#0a0a0f" stroke-width="4.5" stroke-opacity="0.25"/>
+      <line x1="-34" y1="-98" x2="34" y2="-98" stroke="#0a0a0f" stroke-width="4.5" stroke-opacity="0.2"/>
+      <line x1="-36" y1="-70" x2="36" y2="-70" stroke="#0a0a0f" stroke-width="4.5" stroke-opacity="0.17"/>
+      <line x1="-36" y1="-42" x2="36" y2="-42" stroke="#0a0a0f" stroke-width="4.5" stroke-opacity="0.13"/>
+      <line x1="-34" y1="-14" x2="34" y2="-14" stroke="#0a0a0f" stroke-width="4.5" stroke-opacity="0.1"/>
+
+      <!-- U形支架：不透明 -->
+      <path d="M-90 36 A90 90 0 0 0 90 36"
+            fill="none" stroke="#10b981" stroke-width="16" stroke-linecap="round"/>
+
+      <!-- 竖线：不透明 -->
+      <line x1="0" y1="126" x2="0" y2="186" stroke="#10b981" stroke-width="16" stroke-linecap="round"/>
+
+      <!-- 横底座：不透明 -->
+      <line x1="-48" y1="186" x2="48" y2="186" stroke="#10b981" stroke-width="16" stroke-linecap="round"/>
+    </g>
+
+    <!-- 右上角勾号盾牌 -->
+    <g transform="translate(430, 88)">
+      <circle cx="0" cy="0" r="44" fill="#10b981" opacity="0.95" filter="url(#glow)"/>
+      <circle cx="0" cy="0" r="44" fill="none" stroke="white" stroke-width="3" opacity="0.12"/>
+      <polyline points="-19,0 -5,14 24,-15"
+                fill="none" stroke="#0a0a0f" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>
