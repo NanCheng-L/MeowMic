@@ -34,6 +34,7 @@ const availableModels = ref<string[]>([])
 const selectedPreset = ref('standard')
 const monitorEnabled = ref(false)
 const monitorDevice = ref('')
+const explodeIntensity = ref(0.75)
 
 let unlistenToggle: (() => void) | null = null
 let unlistenDevices: (() => void) | null = null
@@ -54,6 +55,7 @@ const loadConfig = () => {
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
       if (config.monitorDevice) monitorDevice.value = config.monitorDevice
+      if (config.explodeIntensity !== undefined) explodeIntensity.value = config.explodeIntensity
     }
   } catch (e) {
     console.error('Failed to load config:', e)
@@ -71,6 +73,7 @@ const saveConfig = () => {
       selectedPreset: selectedPreset.value,
       monitorEnabled: monitorEnabled.value,
       monitorDevice: monitorDevice.value,
+      explodeIntensity: explodeIntensity.value,
     }))
   } catch (e) {
     console.error('Failed to save config:', e)
@@ -371,7 +374,10 @@ onUnmounted(() => {
       </section>
 
       <section class="section">
-        <ExplodeButton />
+        <ExplodeButton
+          :intensity="explodeIntensity"
+          @update:intensity="(v: number) => { explodeIntensity = v; saveConfig() }"
+        />
       </section>
 
       <section class="section visualization">

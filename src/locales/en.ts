@@ -48,6 +48,7 @@ export default {
     hint: '⚠️ Do not use for extended periods',
     start: 'Mic Blast',
     stop: 'Stop Blast',
+    intensity: 'Blast Intensity',
   },
   status: {
     running: 'Running',

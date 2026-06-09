@@ -2,7 +2,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use crate::denoise::{self, FRAME_SIZE};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use wasapi::*;
@@ -63,6 +63,7 @@ pub struct AudioEngine {
     bgm_sender: Sender<Vec<i16>>,
     bgm_receiver: Receiver<Vec<i16>>,
     explode_enabled: Arc<AtomicBool>,
+    explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
     monitor_device_name: Arc<RwLock<Option<String>>>,
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -83,6 +84,7 @@ impl AudioEngine {
             bgm_sender: bgm_tx,
             bgm_receiver: bgm_rx,
             explode_enabled: Arc::new(AtomicBool::new(false)),
+            explode_intensity: Arc::new(AtomicU32::new(75)),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
             monitor_device_name: Arc::new(RwLock::new(None)),
             thread_handle: std::sync::Mutex::new(None),
@@ -113,6 +115,7 @@ impl AudioEngine {
         let bgm_running = self.bgm_running.clone();
         let bgm_receiver = self.bgm_receiver.clone();
         let explode_enabled = self.explode_enabled.clone();
+        let explode_intensity = self.explode_intensity.clone();
         let monitor_enabled = self.monitor_enabled.clone();
         let monitor_device_name = self.monitor_device_name.clone();
         let model_states = self.model_states.clone();
@@ -132,6 +135,7 @@ impl AudioEngine {
                 mn,
                 rd,
                 explode_enabled,
+                explode_intensity,
                 monitor_enabled,
                 monitor_device_name,
                 model_states,
@@ -224,6 +228,11 @@ impl AudioEngine {
     /// 设置爆炸模式
     pub fn set_explode_mode(&self, enabled: bool) {
         self.explode_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 设置爆炸强度 (1-100)
+    pub fn set_explode_intensity(&self, intensity: u32) {
+        self.explode_intensity.store(intensity.clamp(1, 100), Ordering::Relaxed);
     }
 
     /// 设置监听模式
@@ -478,6 +487,7 @@ fn audio_loop(
     model_name: Option<String>,
     resource_dir: Option<std::path::PathBuf>,
     explode_enabled: Arc<AtomicBool>,
+    explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
     monitor_device_name: Arc<RwLock<Option<String>>>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
@@ -673,15 +683,17 @@ fn audio_loop(
 
                 // ============ 💥 爆炸模式：方波失真 ============
                 let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
+                    let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
+                    // intensity 1-100 → gain 1.0-50.0, clip 32000.0-200.0
+                    let gain = 1.0 + (intensity / 100.0).powf(0.6) * 49.0;
+                    let clip = 32000.0 - (intensity / 100.0).powf(1.5) * 31800.0;
                     mixed_samples
                         .iter()
                         .map(|&s| {
-                            // 超高增益，正常说话直接顶满
-                            let boosted = s * 50.0;
-                            // 方波削波：±500 硬截断，几乎把所有波形变成方波
-                            let clipped = boosted.clamp(-500.0, 500.0);
-                            // 再放大回满幅，保持极响
-                            clipped * 65.0
+                            let boosted = s * gain;
+                            let clipped = boosted.clamp(-clip, clip);
+                            // 归一化回 i16 范围
+                            clipped / clip * 32767.0
                         })
                         .collect()
                 } else {

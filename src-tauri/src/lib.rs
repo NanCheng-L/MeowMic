@@ -324,9 +324,12 @@ fn update_bgm_config(state: State<'_, EngineState>, volume: f32) -> Result<(), S
 }
 
 #[tauri::command]
-fn set_explode_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), String> {
+fn set_explode_mode(state: State<'_, EngineState>, enabled: bool, intensity: Option<u32>) -> Result<(), String> {
     let engine = state.engine.lock();
     engine.set_explode_mode(enabled);
+    if let Some(i) = intensity {
+        engine.set_explode_intensity(i);
+    }
     Ok(())
 }
 

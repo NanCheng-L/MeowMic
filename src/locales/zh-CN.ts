@@ -48,6 +48,7 @@ export default {
     hint: '⚠️ 请勿长时间使用',
     start: '一键炸麦',
     stop: '关闭炸麦',
+    intensity: '炸麦强度',
   },
   status: {
     running: '运行中',
