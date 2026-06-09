@@ -4,7 +4,7 @@ import en from './en'
 
 const i18n = createI18n({
   legacy: false,
-  locale: localStorage.getItem('pico-denoise-lang') || 'zh-CN',
+  locale: localStorage.getItem('meowmic-lang') || 'zh-CN',
   fallbackLocale: 'zh-CN',
   messages: {
     'zh-CN': zhCN,
@@ -21,5 +21,5 @@ export const availableLocales = [
 
 export function setLocale(locale: string) {
   ;(i18n.global.locale as any).value = locale
-  localStorage.setItem('pico-denoise-lang', locale)
+  localStorage.setItem('meowmic-lang', locale)
 }

@@ -99,7 +99,7 @@ let unlistenInit: (() => void) | null = null
 
 onMounted(async () => {
   // 从 localStorage 同步语言到 i18n（窗口复用时也能更新）
-  const savedLang = localStorage.getItem('pico-denoise-lang')
+  const savedLang = localStorage.getItem('meowmic-lang')
   if (savedLang) {
     setLocale(savedLang)
   }
@@ -160,10 +160,10 @@ const handleSave = async () => {
   }
 
   // 3. 语言存 localStorage（主窗口下次启动时读取）
-  localStorage.setItem('pico-denoise-lang', localConfig.value.language)
+  localStorage.setItem('meowmic-lang', localConfig.value.language)
 
   // 4. 设备/模型变更存 localStorage，主窗口轮询检测
-  localStorage.setItem('pico-denoise-pending', JSON.stringify({
+  localStorage.setItem('meowmic-pending', JSON.stringify({
     selectedInput: localConfig.value.selectedInput,
     selectedOutput: localConfig.value.selectedOutput,
     selectedModel: localConfig.value.selectedModel,

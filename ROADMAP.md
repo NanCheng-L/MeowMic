@@ -1,4 +1,4 @@
-# pico-denoise 路线图
+# MeowMic（喵咪麦克）路线图
 
 ## 当前状态
 
@@ -90,7 +90,7 @@ SysVAD 是微软官方 WDK 示例虚拟音频设备，原生支持 loopback（�
 
 SysVAD loopback 架构：
 ```
-System Pin 0 → Loopback → WASAPI 捕获（pico-denoise 读取）
+System Pin 0 → Loopback → WASAPI 捕获（MeowMic 读取）
 Offload Pin → Topology → Line Out（实际音频输出）
 ```
 
@@ -99,7 +99,7 @@ Offload Pin → Topology → Line Out（实际音频输出）
 | 删除蓝牙/USB/HDMI 端点 | 低 | 只保留 Speaker 端点 |
 | 删除 APO 插件 | 低 | 删掉 SwapAPO、DelayAPO、AecAPO、KwsAPO |
 | 删除关键词检测 | 低 | 删掉 KeywordDetectorAdapter |
-| 重命名设备 | 低 | INF 改名 "pico-denoise Virtual Speaker" |
+| 重命名设备 | 低 | INF 改名 "MeowMic Virtual Speaker" |
 | 添加捕获端（可选） | 中 | 如需虚拟麦克风输出降噪后音频，需加 Capture pin |
 | 驱动签名 | 无 | 微软免费证明签名（Partner Center） |
 

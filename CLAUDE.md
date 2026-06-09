@@ -1,4 +1,4 @@
-# pico-denoise
+# MeowMic（喵咪麦克）
 
 直播/游戏麦克风降噪桌面应用。Tauri 2 + Vue 3 + TypeScript + Rust。
 

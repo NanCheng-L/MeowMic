@@ -52,14 +52,14 @@ fn ensure_single_instance() {
     };
 
     unsafe {
-        let mutex_name: Vec<u16> = OsStr::new("Global\\pico-denoise-single-instance")
+        let mutex_name: Vec<u16> = OsStr::new("Global\\meowmic-single-instance")
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
         let _mutex = CreateMutexW(None, true, windows::core::PCWSTR(mutex_name.as_ptr()));
 
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            let window_title: Vec<u16> = OsStr::new("pico-denoise")
+            let window_title: Vec<u16> = OsStr::new("MeowMic")
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
@@ -415,7 +415,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("pico-denoise")
+                .tooltip("MeowMic")
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {

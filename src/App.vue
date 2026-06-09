@@ -45,7 +45,7 @@ const openTutorial = async () => {
   const baseUrl = isDev ? 'http://localhost:1420' : 'tauri://localhost'
   new WebviewWindow('tutorial', {
     url: `${baseUrl}/tutorial.html`,
-    title: '使用教程 - pico-denoise',
+    title: '使用教程 - MeowMic',
     width: 520,
     height: 640,
     center: true,
@@ -72,7 +72,7 @@ const openSettings = async () => {
         hotkey: settings.value.hotkey,
         hotkeyEnabled: settings.value.hotkeyEnabled,
         autostart: settings.value.autostart,
-        language: localStorage.getItem('pico-denoise-lang') || 'zh-CN',
+        language: localStorage.getItem('meowmic-lang') || 'zh-CN',
       })
       return
     } catch {
@@ -83,7 +83,7 @@ const openSettings = async () => {
   const baseUrl = isDev ? 'http://localhost:1420' : 'tauri://localhost'
   new WebviewWindow('settings', {
     url: `${baseUrl}/settings.html`,
-    title: '设置 - pico-denoise',
+    title: '设置 - MeowMic',
     width: 480,
     height: 580,
     center: true,
@@ -103,7 +103,7 @@ const openSettings = async () => {
         hotkey: settings.value.hotkey,
         hotkeyEnabled: settings.value.hotkeyEnabled,
         autostart: settings.value.autostart,
-        language: localStorage.getItem('pico-denoise-lang') || 'zh-CN',
+        language: localStorage.getItem('meowmic-lang') || 'zh-CN',
       })
     } catch {}
   }, 300)
@@ -125,7 +125,7 @@ let restarting = false
 
 const loadConfig = () => {
   try {
-    const saved = localStorage.getItem('pico-denoise-config')
+    const saved = localStorage.getItem('meowmic-config')
     if (saved) {
       const config = JSON.parse(saved)
       if (config.selectedInput) selectedInput.value = config.selectedInput
@@ -145,7 +145,7 @@ const loadConfig = () => {
 
 const saveConfig = () => {
   try {
-    localStorage.setItem('pico-denoise-config', JSON.stringify({
+    localStorage.setItem('meowmic-config', JSON.stringify({
       selectedInput: selectedInput.value,
       selectedOutput: selectedOutput.value,
       denoiseEnabled: denoiseEnabled.value,
@@ -417,13 +417,13 @@ onMounted(async () => {
   // 轮询检测设置窗口的变更（localStorage 通信，避免跨窗口 emit 问题）
   setInterval(() => {
     try {
-      const raw = localStorage.getItem('pico-denoise-pending')
+      const raw = localStorage.getItem('meowmic-pending')
       if (!raw) return
       const pending = JSON.parse(raw)
-      localStorage.removeItem('pico-denoise-pending')
+      localStorage.removeItem('meowmic-pending')
       handleApplySettings(pending)
       // 语言切换
-      const lang = localStorage.getItem('pico-denoise-lang')
+      const lang = localStorage.getItem('meowmic-lang')
       if (lang) setLocale(lang)
     } catch {}
   }, 1000)
@@ -450,7 +450,7 @@ onUnmounted(() => {
           <line x1="12" y1="19" x2="12" y2="23"/>
           <line x1="8" y1="23" x2="16" y2="23"/>
         </svg>
-        <h1>pico-denoise</h1>
+        <h1>MeowMic</h1>
       </div>
       <div class="header-right">
         <button class="settings-btn" @click="openTutorial" :title="t('tutorial.title')">

@@ -31,7 +31,7 @@ const conversionHtml = `<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
-        <h1>pico-denoise Icon Converter</h1>
+        <h1>MeowMic Icon Converter</h1>
         <p>Click buttons below to download PNG icons at different sizes:</p>
         <div class="preview">
             <img id="svg" src="icon.svg" style="max-width: 200px;">

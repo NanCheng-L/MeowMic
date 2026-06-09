@@ -2452,6 +2452,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "meowmic"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "deep_filter",
+ "env_logger",
+ "log",
+ "muda",
+ "nnnoiseless",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "tauri-plugin-store",
+ "tract-onnx",
+ "wasapi",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,31 +3078,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "pico-denoise"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "deep_filter",
- "env_logger",
- "log",
- "muda",
- "nnnoiseless",
- "parking_lot",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "tauri-plugin-store",
- "tract-onnx",
- "wasapi",
- "windows 0.58.0",
 ]
 
 [[package]]

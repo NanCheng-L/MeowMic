@@ -97,7 +97,7 @@ export default {
     record: 'Record',
     cancel: 'Cancel',
     autostart: 'Auto Start',
-    autostartDesc: 'Automatically run pico-denoise on system startup',
+    autostartDesc: 'Automatically run MeowMic on system startup',
     autoUpdate: 'Auto Update',
     comingSoon: 'Coming Soon',
     autoUpdateDesc: 'Automatically check and install new versions',

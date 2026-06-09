@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "pico-denoise",
+  "productName": "MeowMic",
   "version": "0.1.0",
-  "identifier": "com.asus.pico-denoise",
+  "identifier": "com.asus.meowmic",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "pico-denoise",
+        "title": "MeowMic",
         "width": 420,
         "height": 680,
         "resizable": true,

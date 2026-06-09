@@ -97,7 +97,7 @@ export default {
     record: '录制',
     cancel: '取消',
     autostart: '开机自启动',
-    autostartDesc: '系统启动时自动运行 pico-denoise',
+    autostartDesc: '系统启动时自动运行 MeowMic',
     autoUpdate: '自动更新',
     comingSoon: '即将推出',
     autoUpdateDesc: '自动检查并安装新版本',

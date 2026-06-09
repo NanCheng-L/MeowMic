@@ -1,8 +1,8 @@
-# pico-denoise
+# 喵咪麦克（MeowMic）
 
-> 🎤 实时麦克风降噪桌面应用，为直播和游戏场景打造。
+> 🐱🎤 实时麦克风降噪桌面应用，为直播和游戏场景打造。
 
-基于 WASAPI 实时音频处理，支持 RNNoise / DeepFilterNet 降噪模型，开箱即用。
+基于 WASAPI 实时音频处理，支持 RNNoise 降噪模型，开箱即用。
 
 ## 功能
 
@@ -31,6 +31,17 @@
 - pnpm
 - Rust + Cargo
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)（输出端需要）
+
+## 兼容性
+
+| 项目 | 说明 |
+|------|------|
+| 操作系统 | Windows 10 (1809+) / Windows 11 |
+| 架构 | x64（ARM64 需自行编译） |
+| 音频 API | WASAPI Shared 模式 |
+| 虚拟音频设备 | [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)（免费，需单独安装） |
+| 已知限制 | 不支持 macOS / Linux（依赖 Windows WASAPI） |
+| 已知限制 | 部分 USB 声卡在 WASAPI Shared 模式下延迟较高 |
 
 ## 安装与运行
 
