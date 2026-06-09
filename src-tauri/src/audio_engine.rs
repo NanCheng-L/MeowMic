@@ -499,12 +499,24 @@ fn audio_loop(
     let output_device = find_device(output_device_name.as_deref(), false)
         .map_err(|e| format!("Failed to find output device: {}", e))?;
 
-    let input_format = WaveFormat::new(16, 16, &SampleType::Int, 48000, 1, None);
-    let output_format = WaveFormat::new(16, 16, &SampleType::Int, 48000, 2, None);
+    // 获取设备原生格式，避免 WASAPI 内部重采样增加延迟
+    let fallback_input_format = WaveFormat::new(16, 16, &SampleType::Int, 48000, 1, None);
+    let fallback_output_format = WaveFormat::new(16, 16, &SampleType::Int, 48000, 2, None);
 
     let mut input_client = input_device
         .get_iaudioclient()
         .map_err(|e| format!("Failed to get input client: {}", e))?;
+
+    let input_format = input_client.get_mixformat().unwrap_or_else(|_| {
+        log::warn!("Failed to get input mixformat, using fallback 48kHz");
+        fallback_input_format
+    });
+    let input_sample_rate = input_format.get_samplespersec();
+    let input_channels = input_format.get_nchannels() as usize;
+    let input_bits = input_format.get_bitspersample();
+    let input_sample_type = input_format.get_subformat().unwrap_or(SampleType::Int);
+    log::info!("Input device format: {}Hz, {}ch, {}bit, {:?}",
+        input_sample_rate, input_channels, input_bits, input_sample_type);
 
     let (def_time, _min_time) = input_client
         .get_periods()
@@ -527,6 +539,14 @@ fn audio_loop(
     let mut output_client = output_device
         .get_iaudioclient()
         .map_err(|e| format!("Failed to get output client: {}", e))?;
+
+    let output_format = output_client.get_mixformat().unwrap_or_else(|_| {
+        log::warn!("Failed to get output mixformat, using fallback 48kHz");
+        fallback_output_format
+    });
+    let output_sample_rate = output_format.get_samplespersec();
+    let output_channels = output_format.get_nchannels() as usize;
+    log::info!("Output device format: {}Hz, {}ch", output_sample_rate, output_channels);
 
     let (def_time, _min_time) = output_client
         .get_periods()
@@ -617,9 +637,15 @@ fn audio_loop(
         .start_stream()
         .map_err(|e| format!("Failed to start output: {}", e))?;
     let mut first_frame = true;
-    let mut input_buffer = vec![0u8; frame_size * 2];
-    let mut output_buffer = vec![0u8; frame_size * 4];
+    // 输入缓冲区：按设备实际 bytes_per_frame 分配
+    let input_bytes_per_frame = input_format.get_blockalign() as usize;
+    let output_bytes_per_frame = output_format.get_blockalign() as usize;
+    let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];
+    let mut output_buffer = vec![0u8; frame_size * output_bytes_per_frame];
     let mut frame_count: u64 = 0;
+
+    // 输入累积缓冲：非 48kHz 设备需要重采样，这里累积 mono f32 样本
+    let mut input_acc: Vec<f32> = Vec::new();
 
     // BGM 缓冲：立体声 i16 样本队列
     let mut bgm_buf: Vec<i16> = Vec::new();
@@ -638,213 +664,249 @@ fn audio_loop(
                     continue;
                 }
 
-                let bytes_read = frames_read as usize * 2;
-                let samples_i16: Vec<i16> = input_buffer[..bytes_read]
-                    .chunks_exact(2)
-                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                    .collect();
+                // 1. 原始字节 → f32 样本（根据设备实际格式）
+                let bytes_read = frames_read as usize * input_bytes_per_frame;
+                let raw_samples = bytes_to_f32_samples(
+                    &input_buffer[..bytes_read],
+                    input_bits,
+                    &input_sample_type,
+                    input_channels,
+                );
 
-                // nnnoiseless expects [-32768, 32767] range
-                let mut input_frame = [0.0f32; 480];
-                for (i, &s) in samples_i16.iter().enumerate().take(frame_size) {
-                    input_frame[i] = s as f32;
-                }
+                // 2. 多声道 → 单声道
+                let mono_samples = downmix_to_mono(&raw_samples, input_channels);
 
-                let mut output_frame = input_frame; // 默认直通
-                if current_config.enabled {
-                    denoise.process_frame(&mut output_frame, &input_frame);
-                }
-
-                // Skip first frame (fade-in artifact)
-                let output_samples = if first_frame {
-                    first_frame = false;
-                    samples_i16.iter().map(|&s| s as f32).collect()
-                } else if current_config.enabled {
-                    output_frame.iter().copied().collect()
+                // 3. 重采样到 48kHz（如果设备采样率不是 48kHz）
+                let resampled = if input_sample_rate != 48000 {
+                    resample_linear(&mono_samples, input_sample_rate, 48000)
                 } else {
-                    samples_i16.iter().map(|&s| s as f32).collect()
+                    mono_samples
                 };
 
-                // Apply strength mixing
-                let mixed_samples: Vec<f32> =
-                    if current_config.enabled && current_config.strength < 1.0 {
-                        output_frame
+                // 4. 累积到输入缓冲
+                input_acc.extend_from_slice(&resampled);
+
+                // 5. 每攒够 frame_size (480) 个样本就处理一帧
+                while input_acc.len() >= frame_size {
+                    let chunk: Vec<f32> = input_acc.drain(..frame_size).collect();
+
+                    let mut input_frame = [0.0f32; 480];
+                    for (i, &s) in chunk.iter().enumerate().take(frame_size) {
+                        input_frame[i] = s;
+                    }
+
+                    let mut output_frame = input_frame;
+                    if current_config.enabled {
+                        denoise.process_frame(&mut output_frame, &input_frame);
+                    }
+
+                    // Skip first frame (fade-in artifact)
+                    let output_samples = if first_frame {
+                        first_frame = false;
+                        chunk.clone()
+                    } else if current_config.enabled {
+                        output_frame.to_vec()
+                    } else {
+                        chunk.clone()
+                    };
+
+                    // Apply strength mixing
+                    let mixed_samples: Vec<f32> =
+                        if current_config.enabled && current_config.strength < 1.0 {
+                            output_frame
+                                .iter()
+                                .zip(chunk.iter())
+                                .map(|(&denoised, &original)| {
+                                    original * (1.0 - current_config.strength)
+                                        + denoised * current_config.strength
+                                })
+                                .collect()
+                        } else {
+                            output_samples
+                        };
+
+                    // ============ 💥 爆炸模式：方波失真 ============
+                    let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
+                        let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
+                        let gain = 1.0 + (intensity / 100.0).powf(0.6) * 49.0;
+                        let clip = 32000.0 - (intensity / 100.0).powf(1.5) * 31800.0;
+                        mixed_samples
                             .iter()
-                            .zip(samples_i16.iter())
-                            .map(|(&denoised, &original)| {
-                                let orig = original as f32;
-                                orig * (1.0 - current_config.strength)
-                                    + denoised * current_config.strength
+                            .map(|&s| {
+                                let boosted = s * gain;
+                                let clipped = boosted.clamp(-clip, clip);
+                                clipped / clip * 32767.0
                             })
                             .collect()
                     } else {
-                        output_samples
+                        mixed_samples
                     };
 
-                // ============ 💥 爆炸模式：方波失真 ============
-                let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
-                    let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
-                    // intensity 1-100 → gain 1.0-50.0, clip 32000.0-200.0
-                    let gain = 1.0 + (intensity / 100.0).powf(0.6) * 49.0;
-                    let clip = 32000.0 - (intensity / 100.0).powf(1.5) * 31800.0;
-                    mixed_samples
-                        .iter()
-                        .map(|&s| {
-                            let boosted = s * gain;
-                            let clipped = boosted.clamp(-clip, clip);
-                            // 归一化回 i16 范围
-                            clipped / clip * 32767.0
-                        })
-                        .collect()
-                } else {
-                    mixed_samples
-                };
+                    // ============ 监听输出 ============
+                    if monitor_enabled.load(Ordering::Relaxed) {
+                        if let Some(ref monitor_render) = monitor_render_opt {
+                            let monitor_ready = if let Some(ref evt) = monitor_event_opt {
+                                evt.wait_for_event(10).is_ok()
+                            } else {
+                                true
+                            };
+                            if monitor_ready {
+                                let monitor_stereo = upmix_to_stereo(&mixed_samples, 2);
+                                for (i, &sample) in monitor_stereo.iter().enumerate() {
+                                    let val = (sample.clamp(-32768.0, 32767.0)) as i16;
+                                    let bytes = val.to_le_bytes();
+                                    monitor_buffer[i * 2] = bytes[0];
+                                    monitor_buffer[i * 2 + 1] = bytes[1];
+                                }
+                                let monitor_frames = (mixed_samples.len()).min(frames_read as usize);
+                                let _ = monitor_render.write_to_device(
+                                    monitor_frames,
+                                    &monitor_buffer[..monitor_frames * 4],
+                                    None,
+                                );
+                            }
+                        }
+                    }
 
-                // ============ 监听输出：降噪后的音频写入默认播放设备 ============
-                if monitor_enabled.load(Ordering::Relaxed) {
-                    if let Some(ref monitor_render) = monitor_render_opt {
-                        // 等待监听设备准备好（最多 10ms，避免阻塞太长时间）
-                        let monitor_ready = if let Some(ref evt) = monitor_event_opt {
-                            evt.wait_for_event(10).is_ok()
-                        } else {
-                            true // 没有事件句柄就直接写
-                        };
+                    // ============ BGM 混音 ============
+                    let final_samples = if bgm_running.load(Ordering::Relaxed) {
+                        if let Some(ref rx) = bgm_receiver {
+                            while let Ok(bgm_samples) = rx.try_recv() {
+                                bgm_buf.extend_from_slice(&bgm_samples);
+                            }
+                        }
+                        let max_buf = frame_size * 2 * 5;
+                        if bgm_buf.len() > max_buf {
+                            let drain = bgm_buf.len() - max_buf;
+                            bgm_buf.drain(..drain);
+                        }
 
-                        if monitor_ready {
-                            // 将 mono f32 samples 转为 stereo i16 写入监听设备
-                            for (i, &sample) in mixed_samples.iter().enumerate() {
+                        let bgm_vol_raw = bgm_config.read().volume;
+                        let bgm_vol = bgm_vol_raw.sqrt() * 0.4;
+
+                        mixed_samples
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &mic_sample)| {
+                                if bgm_buf.is_empty() {
+                                    return mic_sample;
+                                }
+                                let bgm_idx = i * 2;
+                                let bgm_l = if bgm_idx < bgm_buf.len() {
+                                    bgm_buf[bgm_idx] as f32
+                                } else {
+                                    0.0
+                                };
+                                let bgm_r = if bgm_idx + 1 < bgm_buf.len() {
+                                    bgm_buf[bgm_idx + 1] as f32
+                                } else {
+                                    0.0
+                                };
+                                let bgm_mono = (bgm_l + bgm_r) / 2.0;
+                                mic_sample + bgm_mono * bgm_vol
+                            })
+                            .collect()
+                    } else {
+                        mixed_samples
+                    };
+
+                    // 消费已使用的 BGM 样本
+                    let used = final_samples.len() * 2;
+                    if used <= bgm_buf.len() {
+                        bgm_buf.drain(..used);
+                    } else {
+                        bgm_buf.clear();
+                    }
+
+                    // ============ Soft limiter ============
+                    let mut limited_samples = final_samples;
+                    if !explode_enabled.load(Ordering::Relaxed) {
+                        for sample in limited_samples.iter_mut() {
+                            let level = sample.abs();
+                            if level > 28000.0 {
+                                let excess = level - 28000.0;
+                                let compressed = 28000.0 + excess * 0.2;
+                                let sign = if *sample > 0.0 { 1.0 } else { -1.0 };
+                                *sample = sign * compressed.min(32767.0);
+                            }
+                        }
+                    }
+
+                    // 6. 重采样回设备采样率
+                    let resampled_out = if output_sample_rate != 48000 {
+                        resample_linear(&limited_samples, 48000, output_sample_rate)
+                    } else {
+                        limited_samples.clone()
+                    };
+
+                    // 7. 单声道 → 多声道
+                    let stereo_out = upmix_to_stereo(&resampled_out, output_channels);
+
+                    // 8. f32 → 设备格式字节
+                    let out_frames = stereo_out.len() / output_channels;
+                    let out_bytes = out_frames * output_bytes_per_frame;
+                    for (i, &sample) in stereo_out.iter().enumerate() {
+                        let byte_pos = i * (output_bytes_per_frame / output_channels);
+                        match (input_bits, &input_sample_type) {
+                            (16, SampleType::Int) | (16, _) => {
                                 let val = (sample.clamp(-32768.0, 32767.0)) as i16;
                                 let bytes = val.to_le_bytes();
-                                monitor_buffer[i * 4] = bytes[0];
-                                monitor_buffer[i * 4 + 1] = bytes[1];
-                                monitor_buffer[i * 4 + 2] = bytes[0];
-                                monitor_buffer[i * 4 + 3] = bytes[1];
+                                if byte_pos + 1 < output_buffer.len() {
+                                    output_buffer[byte_pos] = bytes[0];
+                                    output_buffer[byte_pos + 1] = bytes[1];
+                                }
                             }
-                            let _ = monitor_render.write_to_device(
-                                frames_read as usize,
-                                &monitor_buffer[..frames_read as usize * 4],
-                                None,
-                            );
-                        }
-                    }
-                }
-
-                // ============ BGM 混音 ============
-                let final_samples = if bgm_running.load(Ordering::Relaxed) {
-                    // 收取所有可用的 BGM 样本
-                    if let Some(ref rx) = bgm_receiver {
-                        while let Ok(bgm_samples) = rx.try_recv() {
-                            bgm_buf.extend_from_slice(&bgm_samples);
-                        }
-                    }
-                    // 限制 BGM 缓冲不超过 5 帧（~50ms），防止延迟累积
-                    let max_buf = frame_size * 2 * 5;
-                    if bgm_buf.len() > max_buf {
-                        let drain = bgm_buf.len() - max_buf;
-                        bgm_buf.drain(..drain);
-                    }
-
-                    let bgm_vol_raw = bgm_config.read().volume;
-                    // 平方根曲线：低音量更精细，高音量压缩，防止突然爆音
-                    let bgm_vol = bgm_vol_raw.sqrt() * 0.4; // 最大增益 40%
-
-                    mixed_samples
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &mic_sample)| {
-                            if bgm_buf.is_empty() {
-                                return mic_sample;
+                            (32, SampleType::Float) => {
+                                let val = (sample / 32767.0).clamp(-1.0, 1.0);
+                                let bytes = val.to_le_bytes();
+                                if byte_pos + 3 < output_buffer.len() {
+                                    output_buffer[byte_pos] = bytes[0];
+                                    output_buffer[byte_pos + 1] = bytes[1];
+                                    output_buffer[byte_pos + 2] = bytes[2];
+                                    output_buffer[byte_pos + 3] = bytes[3];
+                                }
                             }
-                            // BGM 是立体声，每个样本对应左右声道
-                            // 麦克风是单声道，取左右平均
-                            let bgm_idx = i * 2;
-                            let bgm_l = if bgm_idx < bgm_buf.len() {
-                                bgm_buf[bgm_idx] as f32
-                            } else {
-                                0.0
-                            };
-                            let bgm_r = if bgm_idx + 1 < bgm_buf.len() {
-                                bgm_buf[bgm_idx + 1] as f32
-                            } else {
-                                0.0
-                            };
-                            let bgm_mono = (bgm_l + bgm_r) / 2.0;
-
-                            mic_sample + bgm_mono * bgm_vol
-                        })
-                        .collect()
-                } else {
-                    mixed_samples
-                };
-
-                // 消费已使用的 BGM 样本
-                let used = final_samples.len() * 2;
-                if used <= bgm_buf.len() {
-                    bgm_buf.drain(..used);
-                } else {
-                    bgm_buf.clear();
-                }
-
-                // ============ Soft limiter（爆炸模式下跳过，让 hard clip 产生失真）============
-                let mut limited_samples = final_samples;
-                if !explode_enabled.load(Ordering::Relaxed) {
-                    for sample in limited_samples.iter_mut() {
-                        let level = sample.abs();
-                        if level > 28000.0 {
-                            // Soft knee: 超过 28000 后渐进压缩
-                            let excess = level - 28000.0;
-                            let compressed = 28000.0 + excess * 0.2;
-                            let sign = if *sample > 0.0 { 1.0 } else { -1.0 };
-                            *sample = sign * compressed.min(32767.0);
+                            _ => {
+                                let val = (sample.clamp(-32768.0, 32767.0)) as i16;
+                                let bytes = val.to_le_bytes();
+                                if byte_pos + 1 < output_buffer.len() {
+                                    output_buffer[byte_pos] = bytes[0];
+                                    output_buffer[byte_pos + 1] = bytes[1];
+                                }
+                            }
                         }
                     }
-                }
 
-                // Convert to i16 for output
-                let output_i16: Vec<i16> = limited_samples
-                    .iter()
-                    .map(|&s| s.clamp(-32768.0, 32767.0) as i16)
-                    .collect();
+                    let _ = output_render.write_to_device(
+                        out_frames,
+                        &output_buffer[..out_bytes],
+                        None,
+                    );
 
-                // Mono to stereo
-                for (i, &sample) in output_i16.iter().enumerate() {
-                    let bytes = sample.to_le_bytes();
-                    output_buffer[i * 4] = bytes[0];
-                    output_buffer[i * 4 + 1] = bytes[1];
-                    output_buffer[i * 4 + 2] = bytes[0];
-                    output_buffer[i * 4 + 3] = bytes[1];
-                }
+                    frame_count += 1;
 
-                let _ = output_render.write_to_device(
-                    frames_read as usize,
-                    &output_buffer[..frames_read as usize * 4],
-                    None,
-                );
+                    if frame_count % 5 == 0 {
+                        let input_rms = calculate_rms(&input_frame);
+                        let output_rms = calculate_rms(&limited_samples);
+                        let input_level_db = if input_rms > 0.0 {
+                            20.0 * (input_rms / 32768.0).log10()
+                        } else {
+                            -100.0
+                        };
+                        let output_level_db = if output_rms > 0.0 {
+                            20.0 * (output_rms / 32768.0).log10()
+                        } else {
+                            -100.0
+                        };
 
-                frame_count += 1;
-
-                if frame_count % 5 == 0 {
-                    let input_f32: Vec<f32> = samples_i16.iter().map(|&s| s as f32).collect();
-                    let input_rms = calculate_rms(&input_f32);
-                    let output_rms = calculate_rms(&limited_samples);
-                    let input_level_db = if input_rms > 0.0 {
-                        20.0 * (input_rms / 32768.0).log10()
-                    } else {
-                        -100.0
-                    };
-                    let output_level_db = if output_rms > 0.0 {
-                        20.0 * (output_rms / 32768.0).log10()
-                    } else {
-                        -100.0
-                    };
-
-                    let mut current_stats = stats.write();
-                    current_stats.input_level = input_level_db;
-                    current_stats.output_level = output_level_db;
-                    current_stats.noise_reduction_db = input_level_db - output_level_db;
-                    current_stats.frames_processed = frame_count;
-                    current_stats.spectrum = compute_spectrum(&input_f32, 32);
-                }
+                        let mut current_stats = stats.write();
+                        current_stats.input_level = input_level_db;
+                        current_stats.output_level = output_level_db;
+                        current_stats.noise_reduction_db = input_level_db - output_level_db;
+                        current_stats.frames_processed = frame_count;
+                        current_stats.spectrum = compute_spectrum(&input_frame, 32);
+                    }
+                } // end while input_acc.len() >= frame_size
             }
             Err(e) => {
                 log::warn!("Failed to read input: {}", e);
@@ -925,4 +987,73 @@ fn compute_spectrum(samples: &[f32], bands: usize) -> Vec<f32> {
     }
 
     spectrum
+}
+
+/// 线性插值重采样：将音频从 from_rate 重采样到 to_rate
+fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate || input.is_empty() {
+        return input.to_vec();
+    }
+    let ratio = from_rate as f64 / to_rate as f64;
+    let output_len = (input.len() as f64 / ratio) as usize;
+    let mut output = Vec::with_capacity(output_len);
+    for i in 0..output_len {
+        let src_pos = i as f64 * ratio;
+        let src_idx = src_pos as usize;
+        let frac = src_pos - src_idx as f64;
+        let sample = if src_idx + 1 < input.len() {
+            input[src_idx] * (1.0 - frac as f32) + input[src_idx + 1] * frac as f32
+        } else {
+            input[src_idx]
+        };
+        output.push(sample);
+    }
+    output
+}
+
+/// 将原始字节样本（i16 或 f32）转换为 f32 归一化值
+fn bytes_to_f32_samples(buf: &[u8], bits: u16, sample_type: &SampleType, _channels: usize) -> Vec<f32> {
+    match (bits, sample_type) {
+        (16, SampleType::Int) => buf
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
+            .collect(),
+        (32, SampleType::Float) => buf
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * 32767.0)
+            .collect(),
+        (32, SampleType::Int) => buf
+            .chunks_exact(4)
+            .map(|c| {
+                let val = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                (val >> 16) as f32
+            })
+            .collect(),
+        _ => buf
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
+            .collect(),
+    }
+}
+
+/// 多声道转单声道（取平均）
+fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    samples
+        .chunks(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
+/// 单声道转多声道（复制到每个声道）
+fn upmix_to_stereo(samples: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    samples
+        .iter()
+        .flat_map(|&s| vec![s; channels])
+        .collect()
 }

@@ -11,6 +11,7 @@ import AudioMeter from './components/AudioMeter.vue'
 import SpectrumVisualizer from './components/SpectrumVisualizer.vue'
 import StatusBadge from './components/StatusBadge.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import TutorialDialog from './components/TutorialDialog.vue'
 import BgmMixer from './components/BgmMixer.vue'
 import ExplodeButton from './components/ExplodeButton.vue'
 
@@ -29,6 +30,7 @@ const denoiseEnabled = ref(true)
 const denoiseStrength = ref(0.8)
 const isLoading = ref(false)
 const showSettings = ref(false)
+const showTutorial = ref(false)
 const selectedModel = ref('RNNoise')
 const availableModels = ref<string[]>([])
 const selectedPreset = ref('standard')
@@ -328,6 +330,13 @@ onUnmounted(() => {
         <h1>pico-denoise</h1>
       </div>
       <div class="header-right">
+        <button class="settings-btn" @click="showTutorial = true" :title="t('tutorial.title')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </button>
         <button class="settings-btn" @click="showSettings = true" :title="t('settings.title')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
@@ -408,6 +417,7 @@ onUnmounted(() => {
     </main>
 
     <SettingsDialog :open="showSettings" @close="showSettings = false" />
+    <TutorialDialog :open="showTutorial" @close="showTutorial = false" />
   </div>
 </template>
 
