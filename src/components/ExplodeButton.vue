@@ -1,21 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
+import { computed, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 
 const props = defineProps<{
   intensity: number
+  enabled: boolean
 }>()
 
 const emit = defineEmits<{
   'update:intensity': [value: number]
+  'update:enabled': [value: boolean]
 }>()
 
 const { t } = useI18n()
-
-const isExploding = ref(false)
-const countdown = ref(0)
-let timer: ReturnType<typeof setInterval> | null = null
 
 const intensityPercent = computed(() => Math.round(props.intensity * 100))
 
@@ -27,48 +25,22 @@ const sliderColor = computed(() => {
 })
 
 const toggle = async () => {
-  if (isExploding.value) {
-    stopExplode()
-  } else {
-    startExplode()
-  }
-}
-
-const startExplode = async () => {
-  isExploding.value = true
-  countdown.value = 10
-  await invoke('set_explode_mode', { enabled: true, intensity: Math.round(props.intensity * 100) })
-
-  timer = setInterval(() => {
-    countdown.value--
-    if (countdown.value <= 0) {
-      stopExplode()
-    }
-  }, 1000)
-}
-
-const stopExplode = async () => {
-  isExploding.value = false
-  countdown.value = 0
-  if (timer) {
-    clearInterval(timer)
-    timer = null
-  }
-  await invoke('set_explode_mode', { enabled: false })
+  const next = !props.enabled
+  emit('update:enabled', next)
+  await invoke('set_explode_mode', { enabled: next, intensity: Math.round(props.intensity * 100) })
 }
 
 const handleSliderInput = async (e: Event) => {
   const val = Number((e.target as HTMLInputElement).value)
   emit('update:intensity', val / 100)
   // 如果正在炸麦，实时更新强度
-  if (isExploding.value) {
+  if (props.enabled) {
     await invoke('set_explode_mode', { enabled: true, intensity: val })
   }
 }
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
-  if (isExploding.value) {
+  if (props.enabled) {
     invoke('set_explode_mode', { enabled: false }).catch(() => {})
   }
 })
@@ -80,15 +52,17 @@ onUnmounted(() => {
       <span class="explode-label">{{ t('explode.label') }}</span>
       <span class="explode-hint">{{ t('explode.hint') }}</span>
     </div>
-    <button
-      class="explode-btn"
-      :class="{ active: isExploding }"
-      @click="toggle"
-    >
-      <span class="explode-icon">💥</span>
-      <span class="explode-text">{{ isExploding ? t('explode.stop') : t('explode.start') }}</span>
-      <span v-if="isExploding" class="countdown">{{ countdown }}s</span>
-    </button>
+
+    <div class="explode-row">
+      <button
+        class="explode-btn"
+        :class="{ active: enabled }"
+        @click="toggle"
+      >
+        <span class="explode-icon">💥</span>
+        <span class="explode-text">{{ enabled ? t('explode.stop') : t('explode.start') }}</span>
+      </button>
+    </div>
 
     <div class="slider-section">
       <div class="slider-header">
@@ -139,6 +113,11 @@ onUnmounted(() => {
   color: var(--text-muted);
 }
 
+.explode-row {
+  display: flex;
+  align-items: center;
+}
+
 .explode-btn {
   display: flex;
   align-items: center;
@@ -180,16 +159,6 @@ onUnmounted(() => {
   letter-spacing: 1px;
 }
 
-.countdown {
-  background: rgba(0, 0, 0, 0.4);
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 13px;
-  font-weight: 600;
-  font-family: 'DM Mono', monospace;
-  color: #fca5a5;
-}
-
 .slider-section {
   display: flex;
   flex-direction: column;
@@ -218,36 +187,38 @@ onUnmounted(() => {
 }
 
 .slider {
-  -webkit-appearance: none;
-  appearance: none;
   width: 100%;
   height: 6px;
   border-radius: 3px;
-  background: var(--bg-tertiary);
+  background: var(--border);
   outline: none;
+  appearance: none;
   cursor: pointer;
 }
 
 .slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
   appearance: none;
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--slider-color, #ef4444);
+  background: var(--slider-color);
   cursor: pointer;
-  border: 2px solid var(--bg-primary);
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 0 8px var(--slider-color);
+  transition: transform 0.2s;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
 }
 
 .slider::-moz-range-thumb {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--slider-color, #ef4444);
+  background: var(--slider-color);
   cursor: pointer;
-  border: 2px solid var(--bg-primary);
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.3);
+  border: none;
+  box-shadow: 0 0 8px var(--slider-color);
 }
 
 .slider-labels {

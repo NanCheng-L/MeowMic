@@ -35,6 +35,7 @@ const selectedPreset = ref('standard')
 const monitorEnabled = ref(false)
 const monitorDevice = ref('')
 const explodeIntensity = ref(0.75)
+const explodeEnabled = ref(false)
 
 let unlistenToggle: (() => void) | null = null
 let unlistenDevices: (() => void) | null = null
@@ -376,7 +377,9 @@ onUnmounted(() => {
       <section class="section">
         <ExplodeButton
           :intensity="explodeIntensity"
+          :enabled="explodeEnabled"
           @update:intensity="(v: number) => { explodeIntensity = v; saveConfig() }"
+          @update:enabled="(v: boolean) => { explodeEnabled = v }"
         />
       </section>
 
