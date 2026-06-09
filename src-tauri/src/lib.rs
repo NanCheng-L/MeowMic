@@ -1,4 +1,6 @@
 mod audio_engine;
+mod denoise;
+mod device_watcher;
 
 use audio_engine::{AudioEngine, DenoiseConfig, AudioStats};
 use parking_lot::Mutex;
@@ -19,10 +21,12 @@ struct EngineState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AppSettings {
     hotkey: String,
     hotkey_enabled: bool,
     autostart: bool,
+    language: String,
 }
 
 impl Default for AppSettings {
@@ -31,6 +35,7 @@ impl Default for AppSettings {
             hotkey: "Ctrl+Shift+D".into(),
             hotkey_enabled: true,
             autostart: false,
+            language: "zh-CN".into(),
         }
     }
 }
@@ -79,11 +84,23 @@ fn ensure_single_instance() {}
 #[tauri::command]
 fn start_denoising(
     state: State<'_, EngineState>,
+    app: tauri::AppHandle,
     input_device: Option<String>,
     output_device: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
+    // 优先用 Tauri 资源目录（build 模式），fallback 到源码目录（dev 模式）
+    let resource_dir = app.path().resource_dir().ok().map(|d| {
+        let models_dir = d.join("models");
+        if models_dir.join("enc.onnx").exists() {
+            models_dir
+        } else {
+            // dev 模式：资源在 src-tauri/resources/models/
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("models")
+        }
+    });
     let engine = state.engine.lock();
-    engine.start(input_device, output_device)
+    engine.start(input_device, output_device, model, resource_dir)
 }
 
 #[tauri::command]
@@ -149,6 +166,80 @@ fn list_output_devices() -> Result<Vec<String>, String> {
         }
     }
     Ok(devices)
+}
+
+#[tauri::command]
+async fn install_vb_cable(app: AppHandle) -> Result<String, String> {
+    // 定位安装包
+    let setup_path = if let Some(resource_dir) = app.path().resource_dir().ok() {
+        let p = resource_dir.join("vb-cable").join("VBCABLE_Setup_x64.exe");
+        if p.exists() { Some(p) } else { None }
+    } else {
+        None
+    }.or_else(|| {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let p = std::path::PathBuf::from(manifest_dir).join("resources").join("vb-cable").join("VBCABLE_Setup_x64.exe");
+        if p.exists() { Some(p) } else { None }
+    });
+
+    let setup_path = setup_path.ok_or("VB-Cable installer not found in resources")?;
+    let setup_str = setup_path.to_str().ok_or("Invalid path")?;
+    let work_dir = setup_path.parent().unwrap_or(std::path::Path::new("."));
+    let work_str = work_dir.to_str().unwrap_or(".");
+
+    log::info!("Installing VB-Cable from: {}", setup_str);
+
+    // raw FFI: ShellExecuteW + "runas" 触发 UAC（UAC 显示 VB-Cable 安装程序）
+    extern "system" {
+        pub fn ShellExecuteW(
+            hwnd: *mut core::ffi::c_void,
+            lpoperation: *const u16,
+            lpfile: *const u16,
+            lpparameters: *const u16,
+            lpdirectory: *const u16,
+            nshowcmd: u32,
+        ) -> *mut core::ffi::c_void;
+    }
+
+    let setup_wide: Vec<u16> = setup_str.encode_utf16().chain(std::iter::once(0)).collect();
+    let runas_wide: Vec<u16> = "runas\0".encode_utf16().collect();
+    let work_wide: Vec<u16> = work_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            runas_wide.as_ptr(),
+            setup_wide.as_ptr(),
+            core::ptr::null(),  // 不传 /SILENT，让用户在安装器中操作
+            work_wide.as_ptr(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+
+    if result as usize <= 32 {
+        return Err(format!("Failed to launch installer (UAC denied?), code: {}", result as usize));
+    }
+
+    // 轮询检测 VB-Cable 是否出现（最多等 60 秒，用户需要手动点安装）
+    let _ = wasapi::initialize_mta().ok();
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if let Ok(collection) = wasapi::DeviceCollection::new(&wasapi::Direction::Render) {
+            let count = collection.get_nbr_devices().unwrap_or(0);
+            for i in 0..count {
+                if let Ok(device) = collection.get_device_at_index(i) {
+                    if let Ok(name) = device.get_friendlyname() {
+                        if name.to_lowercase().contains("cable") {
+                            log::info!("VB-Cable installed and detected: {}", name);
+                            return Ok("VB-Cable installed successfully".to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err("timed out".to_string())
 }
 
 #[tauri::command]
@@ -239,6 +330,25 @@ fn set_explode_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), 
     Ok(())
 }
 
+#[tauri::command]
+fn set_monitor_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), String> {
+    let engine = state.engine.lock();
+    engine.set_monitor_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_monitor_device(state: State<'_, EngineState>, device: Option<String>) -> Result<(), String> {
+    let engine = state.engine.lock();
+    engine.set_monitor_device(device);
+    Ok(())
+}
+
+#[tauri::command]
+fn list_denoise_models() -> Vec<&'static str> {
+    denoise::list_models()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
@@ -275,6 +385,10 @@ pub fn run() {
             stop_bgm,
             update_bgm_config,
             set_explode_mode,
+            set_monitor_mode,
+            set_monitor_device,
+            list_denoise_models,
+            install_vb_cable,
         ])
         .setup(move |app| {
             // 开机自启动时隐藏窗口，手动启动时显示
@@ -353,6 +467,12 @@ pub fn run() {
                     }
                 }
             }
+
+            // 启动设备热拔插检测
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                device_watcher::start_device_watcher(app_handle, 3);
+            });
 
             Ok(())
         })

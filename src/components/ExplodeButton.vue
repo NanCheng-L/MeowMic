@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
+
+const { t } = useI18n()
 
 const isExploding = ref(false)
 const countdown = ref(0)
@@ -48,8 +51,8 @@ onUnmounted(() => {
 <template>
   <div class="explode-section">
     <div class="explode-header">
-      <span class="explode-label">恶搞模式</span>
-      <span class="explode-hint">⚠️ 请勿长时间使用</span>
+      <span class="explode-label">{{ t('explode.label') }}</span>
+      <span class="explode-hint">{{ t('explode.hint') }}</span>
     </div>
     <button
       class="explode-btn"
@@ -57,7 +60,7 @@ onUnmounted(() => {
       @click="toggle"
     >
       <span class="explode-icon">💥</span>
-      <span class="explode-text">{{ isExploding ? '关闭炸麦' : '一键炸麦' }}</span>
+      <span class="explode-text">{{ isExploding ? t('explode.stop') : t('explode.start') }}</span>
       <span v-if="isExploding" class="countdown">{{ countdown }}s</span>
     </button>
   </div>

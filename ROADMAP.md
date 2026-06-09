@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-Phase 0-11 已完成（2026-06-04）：
+Phase 0-11 + 设备热拔插 + i18n 已完成（2026-06-06）：
 - ✅ Tauri 2 + Vue 3 项目初始化
 - ✅ WASAPI 音频引擎
 - ✅ Vue 组件（设备选择 / 降噪控制 / 电平表 / 频谱 / 状态徽章）
@@ -14,6 +14,8 @@ Phase 0-11 已完成（2026-06-04）：
 - ✅ BGM 混音（WASAPI Process Loopback 按进程捕获音频）
 - ✅ 一键炸麦（50x 增益 + 方波失真，10s 自动关闭）
 - ✅ 频谱频率坐标标注
+- ✅ 设备热拔插检测（后台轮询 + Tauri 事件通知）
+- ✅ 多语言支持（vue-i18n，中文 / 英文）
 
 ## 迭代计划
 
@@ -23,8 +25,8 @@ Phase 0-11 已完成（2026-06-04）：
 
 - [x] WASAPI 设备枚举 + 音频流
 - [x] 简易降噪（simple_denoise）
-- [ ] 替换为 RNNoise（nnnoiseless crate）
-- [ ] VB-Audio Virtual Cable 输出验证
+- [x] 替换为 RNNoise（nnnoiseless crate，即 RNNoise 纯 Rust 实现）
+- [x] VB-Audio Virtual Cable 输出验证
 
 ### 第二阶段：能用
 
@@ -34,19 +36,21 @@ Phase 0-11 已完成（2026-06-04）：
 - [x] 降噪强度调节
 - [x] 电平表 + 频谱可视化
 - [x] 状态徽章（运行中/延迟）
-- [ ] 设备热拔插检测
+- [x] 设备热拔插检测
 
 ### 第三阶段：好用
 
-> AI 模型替换 RNNoise + 预设模式 + 托盘常驻 + 多语言
+> 多模型架构 + AI 模型替换 RNNoise + 预设模式 + 托盘常驻 + 多语言
 
-- [ ] 更好的降噪模型（比 RNNoise 效果更好）
-- [ ] 预设模式（安静环境 / 嘈杂环境 / 游戏 / 直播）
-- [ ] 托盘常驻 + 开机自启动 ✅ 已完成
-- [ ] 全局快捷键切换 ✅ 已完成
-- [ ] 多语言支持（中文 / 英文，vue-i18n）
-- [ ] 恶搞功能：一键炸麦（增益爆表 + 失真，需确认弹窗防误触）
-- [ ] BGM 混音（捕获系统音频 + 麦克风混音输出到虚拟麦克风）
+- [x] 多模型架构（DenoiseModel trait + 模型选择 UI）— 2026-06-06
+- [ ] DeepFilterNet 模型集成（tract-onnx 推理，3 个 ONNX 模型：enc + erb_dec + df_dec）— 代码已写好但炸麦，需异步加载
+- [ ] 自定义模型训练（使用 DNS Challenge 数据集微调）
+- [x] 预设模式（安静/标准/嘈杂/直播，滑块联动）— 2026-06-06
+- [x] 托盘常驻 + 开机自启动
+- [x] 全局快捷键切换
+- [x] 多语言支持（中文 / 英文，vue-i18n）
+- [x] 恶搞功能：一键炸麦（50x 增益 + 方波失真，10s 自动关闭）
+- [x] BGM 混音（WASAPI Process Loopback 按进程捕获 + 混音输出）
 
 #### BGM 混音功能详设
 
@@ -112,6 +116,25 @@ Offload Pin → Topology → Line Out（实际音频输出）
 - [ ] NSIS/Inno Setup 安装包
 - [ ] 自动更新（tauri-plugin-updater）
 - [ ] 许可证/激活机制
+
+## 降噪模型架构
+
+多模型选择架构（2026-06-06 实现）：
+
+```
+src-tauri/src/denoise/
+  mod.rs          # DenoiseModel trait + list_models() + create_model() 工厂
+  rnnoise.rs      # RNNoise 适配器（nnnoiseless crate）
+  deepfilter.rs   # DeepFilterNet3 适配器（tract-onnx + 3 个 ONNX 模型）
+```
+
+- **统一接口**：`DenoiseModel` trait，480 samples/帧、48kHz、f32 输入输出
+- **工厂模式**：`create_model(name)` 按名称创建模型实例
+- **前端选择**：DenoiseControl 组件模型下拉框，切换时自动重启引擎
+- **扩展方式**：新建 `denoise/xxx.rs` + 实现 trait + 在 `mod.rs` 注册即可
+
+待集成模型路线：
+1. **自训模型** — DNS Challenge 数据集 + PyTorch 训练 → ONNX 导出 → tract 推理
 
 ## 关键踩坑记录
 

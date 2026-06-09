@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   running: boolean
@@ -16,7 +19,7 @@ const latencyColor = computed(() => {
 <template>
   <div class="status-badge">
     <div class="status-dot" :class="{ running }"></div>
-    <span class="status-text">{{ running ? '运行中' : '已停止' }}</span>
+    <span class="status-text">{{ running ? t('status.running') : t('status.stopped') }}</span>
     <span class="latency" :style="{ color: latencyColor }" v-if="running">
       {{ latency.toFixed(0) }}ms
     </span>

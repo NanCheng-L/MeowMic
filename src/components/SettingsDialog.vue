@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useSettings } from '../composables/useSettings'
+import { setLocale, availableLocales } from '../locales'
+
+const { t, locale } = useI18n()
 
 defineProps<{
   open: boolean
@@ -16,6 +20,7 @@ const localSettings = ref({
   hotkey: settings.value.hotkey,
   hotkeyEnabled: settings.value.hotkeyEnabled,
   autostart: settings.value.autostart,
+  language: settings.value.language,
 })
 
 const recording = ref(false)
@@ -67,7 +72,7 @@ const startRecording = () => {
         recording.value = false
         stopRecording()
       } else {
-        hotkeyError.value = '需要至少一个修饰键（Ctrl/Shift/Alt/Win）'
+        hotkeyError.value = t('settings.modifierError')
         recording.value = false
         stopRecording()
       }
@@ -92,18 +97,24 @@ const stopRecording = () => {
 
 const handleSave = async () => {
   saving.value = true
+  hotkeyError.value = ''
   try {
     await saveSettings({ ...localSettings.value })
+  } catch (e) {
+    console.error('Failed to save settings:', e)
+    saving.value = false
+    return
+  }
 
+  try {
     if (localSettings.value.hotkeyEnabled) {
       await registerHotkey(localSettings.value.hotkey)
     } else {
       await unregisterHotkey()
     }
-
     emit('close')
   } catch (e) {
-    hotkeyError.value = '快捷键注册失败，可能与其他快捷键冲突'
+    hotkeyError.value = t('settings.hotkeyError')
   } finally {
     saving.value = false
   }
@@ -114,6 +125,7 @@ const handleClose = () => {
     hotkey: settings.value.hotkey,
     hotkeyEnabled: settings.value.hotkeyEnabled,
     autostart: settings.value.autostart,
+    language: settings.value.language,
   }
   hotkeyError.value = ''
   emit('close')
@@ -131,7 +143,7 @@ onUnmounted(() => {
         <Transition name="slide">
           <div v-if="open" class="dialog">
             <div class="dialog-header">
-              <h2>设置</h2>
+              <h2>{{ t('settings.title') }}</h2>
               <button class="close-btn" @click="handleClose">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="4" y1="4" x2="12" y2="12"/>
@@ -144,7 +156,7 @@ onUnmounted(() => {
               <!-- 快捷键 -->
               <div class="setting-group">
                 <div class="setting-header">
-                  <span class="setting-label">全局快捷键</span>
+                  <span class="setting-label">{{ t('settings.hotkey') }}</span>
                   <button
                     class="toggle"
                     :class="{ active: localSettings.hotkeyEnabled }"
@@ -153,19 +165,19 @@ onUnmounted(() => {
                     <span class="toggle-knob"></span>
                   </button>
                 </div>
-                <p class="setting-desc">在任何地方按下快捷键即可切换降噪开关</p>
+                <p class="setting-desc">{{ t('settings.hotkeyDesc') }}</p>
 
                 <div class="hotkey-section">
                   <div class="hotkey-display">
                     <span v-if="!recording" class="hotkey-value">{{ localSettings.hotkey }}</span>
-                    <span v-else class="hotkey-recording">按下快捷键组合...</span>
+                    <span v-else class="hotkey-recording">{{ t('settings.hotkeyRecording') }}</span>
                   </div>
                   <button
                     class="record-btn"
                     :class="{ recording }"
                     @click="recording ? stopRecording() : startRecording()"
                   >
-                    {{ recording ? '取消' : '录制' }}
+                    {{ recording ? t('settings.cancel') : t('settings.record') }}
                   </button>
                 </div>
                 <p v-if="hotkeyError" class="hotkey-error">{{ hotkeyError }}</p>
@@ -174,7 +186,7 @@ onUnmounted(() => {
               <!-- 开机自启 -->
               <div class="setting-group">
                 <div class="setting-header">
-                  <span class="setting-label">开机自启动</span>
+                  <span class="setting-label">{{ t('settings.autostart') }}</span>
                   <button
                     class="toggle"
                     :class="{ active: localSettings.autostart }"
@@ -183,23 +195,39 @@ onUnmounted(() => {
                     <span class="toggle-knob"></span>
                   </button>
                 </div>
-                <p class="setting-desc">系统启动时自动运行 pico-denoise</p>
+                <p class="setting-desc">{{ t('settings.autostartDesc') }}</p>
               </div>
 
               <!-- 自动更新占位 -->
               <div class="setting-group disabled">
                 <div class="setting-header">
-                  <span class="setting-label">自动更新</span>
-                  <span class="coming-soon">即将推出</span>
+                  <span class="setting-label">{{ t('settings.autoUpdate') }}</span>
+                  <span class="coming-soon">{{ t('settings.comingSoon') }}</span>
                 </div>
-                <p class="setting-desc">自动检查并安装新版本</p>
+                <p class="setting-desc">{{ t('settings.autoUpdateDesc') }}</p>
+              </div>
+
+              <!-- 语言切换 -->
+              <div class="setting-group">
+                <div class="setting-header">
+                  <span class="setting-label">{{ t('settings.language') }}</span>
+                  <select
+                    class="language-select"
+                    :value="locale"
+                    @change="setLocale(($event.target as HTMLSelectElement).value)"
+                  >
+                    <option v-for="l in availableLocales" :key="l.value" :value="l.value">
+                      {{ l.label }}
+                    </option>
+                  </select>
+                </div>
               </div>
             </div>
 
             <div class="dialog-footer">
-              <button class="btn btn-secondary" @click="handleClose">取消</button>
+              <button class="btn btn-secondary" @click="handleClose">{{ t('settings.cancel') }}</button>
               <button class="btn btn-primary" @click="handleSave" :disabled="saving">
-                {{ saving ? '保存中...' : '保存' }}
+                {{ saving ? t('settings.saving') : t('settings.save') }}
               </button>
             </div>
           </div>
@@ -447,6 +475,21 @@ onUnmounted(() => {
 .btn-primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.language-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  outline: none;
+}
+
+.language-select:focus {
+  border-color: var(--accent);
 }
 
 /* Transitions */

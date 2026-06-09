@@ -1,5 +1,5 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
-use nnnoiseless::DenoiseState;
+use crate::denoise::{self, FRAME_SIZE};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +63,12 @@ pub struct AudioEngine {
     bgm_sender: Sender<Vec<i16>>,
     bgm_receiver: Receiver<Vec<i16>>,
     explode_enabled: Arc<AtomicBool>,
+    monitor_enabled: Arc<AtomicBool>,
+    monitor_device_name: Arc<RwLock<Option<String>>>,
+    thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    bgm_thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// 模型内部状态（归一化统计等），按模型名分别保存
+    model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 }
 
 impl AudioEngine {
@@ -77,6 +83,11 @@ impl AudioEngine {
             bgm_sender: bgm_tx,
             bgm_receiver: bgm_rx,
             explode_enabled: Arc::new(AtomicBool::new(false)),
+            monitor_enabled: Arc::new(AtomicBool::new(false)),
+            monitor_device_name: Arc::new(RwLock::new(None)),
+            thread_handle: std::sync::Mutex::new(None),
+            bgm_thread_handle: std::sync::Mutex::new(None),
+            model_states: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -84,10 +95,16 @@ impl AudioEngine {
         &self,
         input_device_name: Option<String>,
         output_device_name: Option<String>,
+        model_name: Option<String>,
+        resource_dir: Option<std::path::PathBuf>,
     ) -> Result<(), String> {
         if self.running.load(Ordering::Relaxed) {
             return Err("Engine is already running".to_string());
         }
+
+        // 模型在音频线程内加载（避免阻塞主线程）
+        let mn = model_name.clone();
+        let rd = resource_dir.clone();
 
         let running = self.running.clone();
         let config = self.config.clone();
@@ -96,10 +113,13 @@ impl AudioEngine {
         let bgm_running = self.bgm_running.clone();
         let bgm_receiver = self.bgm_receiver.clone();
         let explode_enabled = self.explode_enabled.clone();
+        let monitor_enabled = self.monitor_enabled.clone();
+        let monitor_device_name = self.monitor_device_name.clone();
+        let model_states = self.model_states.clone();
 
         running.store(true, Ordering::Relaxed);
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             if let Err(e) = audio_loop(
                 running,
                 config,
@@ -109,11 +129,19 @@ impl AudioEngine {
                 Some(bgm_receiver),
                 input_device_name,
                 output_device_name,
+                mn,
+                rd,
                 explode_enabled,
+                monitor_enabled,
+                monitor_device_name,
+                model_states,
             ) {
                 log::error!("Audio engine error: {}", e);
             }
         });
+
+        // 存储线程句柄，stop() 时等待退出
+        *self.thread_handle.lock().unwrap() = Some(handle);
 
         Ok(())
     }
@@ -121,6 +149,10 @@ impl AudioEngine {
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
         self.stop_bgm();
+        // 等待音频线程退出，避免旧流残留导致回音
+        if let Some(handle) = self.thread_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
     }
 
     pub fn update_config(&self, config: DenoiseConfig) {
@@ -139,13 +171,7 @@ impl AudioEngine {
     /// 启动 BGM 捕获线程（按进程 PID）
     pub fn start_bgm(&self, process_name: String, pid: u32) -> Result<(), String> {
         // 如果旧线程还在运行，先停止并等待退出
-        if self.bgm_running.load(Ordering::Relaxed) {
-            self.bgm_running.store(false, Ordering::Relaxed);
-            // 给旧线程时间退出 WASAPI（最多 300ms）
-            std::thread::sleep(Duration::from_millis(300));
-            // 清空 channel 中残留数据
-            while self.bgm_receiver.try_recv().is_ok() {}
-        }
+        self.stop_bgm();
 
         let sender = self.bgm_sender.clone();
 
@@ -161,7 +187,7 @@ impl AudioEngine {
         bgm_running.store(true, Ordering::Relaxed);
         let bgm_config = self.bgm_config.clone();
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("bgm-loopback".into())
             .spawn(move || {
                 if let Err(e) = bgm_process_loop(bgm_running, bgm_config, sender, pid) {
@@ -169,6 +195,9 @@ impl AudioEngine {
                 }
             })
             .map_err(|e| format!("Failed to spawn BGM thread: {}", e))?;
+
+        // 存储线程句柄，stop_bgm() 时 join
+        *self.bgm_thread_handle.lock().unwrap() = Some(handle);
 
         Ok(())
     }
@@ -178,6 +207,12 @@ impl AudioEngine {
         self.bgm_running.store(false, Ordering::Relaxed);
         let mut cfg = self.bgm_config.write();
         cfg.enabled = false;
+        drop(cfg);
+        // 等待 BGM 线程退出，清空残留数据
+        if let Some(handle) = self.bgm_thread_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        while self.bgm_receiver.try_recv().is_ok() {}
     }
 
     /// 更新 BGM 配置（音量等）
@@ -189,6 +224,16 @@ impl AudioEngine {
     /// 设置爆炸模式
     pub fn set_explode_mode(&self, enabled: bool) {
         self.explode_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 设置监听模式
+    pub fn set_monitor_enabled(&self, enabled: bool) {
+        self.monitor_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 设置监听设备
+    pub fn set_monitor_device(&self, device_name: Option<String>) {
+        *self.monitor_device_name.write() = device_name;
     }
 }
 
@@ -430,7 +475,12 @@ fn audio_loop(
     bgm_receiver: Option<Receiver<Vec<i16>>>,
     input_device_name: Option<String>,
     output_device_name: Option<String>,
+    model_name: Option<String>,
+    resource_dir: Option<std::path::PathBuf>,
     explode_enabled: Arc<AtomicBool>,
+    monitor_enabled: Arc<AtomicBool>,
+    monitor_device_name: Arc<RwLock<Option<String>>>,
+    saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
 
@@ -494,15 +544,68 @@ fn audio_loop(
         .get_audiorenderclient()
         .map_err(|e| format!("Failed to get output render client: {}", e))?;
 
+    let frame_size = FRAME_SIZE;
+
+    // ====== 监听客户端：用户选择的设备（耳机/扬声器），用于实时监听降噪效果 ======
+    let monitor_device = monitor_device_name.read().clone();
+    let user_output_name = output_device_name.unwrap_or_default();
+
+    let mut monitor_client_opt: Option<AudioClient> = None;
+    let mut monitor_render_opt: Option<AudioRenderClient> = None;
+    let mut monitor_event_opt: Option<wasapi::Handle> = None;
+    let mut monitor_buffer = vec![0u8; frame_size * 4];
+
+    if let Some(ref m_device_name) = monitor_device {
+        if let Ok(monitor_output) = find_device(Some(m_device_name), false) {
+            let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
+            if monitor_output_name != user_output_name {
+                if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
+                    let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
+                    if m_client.initialize_client(
+                        &output_format,
+                        def_time,
+                        &Direction::Render,
+                        &ShareMode::Shared,
+                        true,
+                    ).is_ok()
+                    {
+                        if let Ok(render) = m_client.get_audiorenderclient() {
+                            let evt = m_client.set_get_eventhandle();
+                            if m_client.start_stream().is_ok() {
+                                log::info!("Monitor started: {}", monitor_output_name);
+                                monitor_render_opt = Some(render);
+                                monitor_event_opt = evt.ok();
+                                monitor_client_opt = Some(m_client);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ====== 模型加载（在音频流启动之前，避免阻塞 WASAPI 导致炸麦）======
+    let load_start = std::time::Instant::now();
+    let mut denoise = denoise::create_model(model_name.as_deref().unwrap_or("RNNoise"), resource_dir.as_deref());
+    let load_elapsed = load_start.elapsed().as_millis();
+    log::info!("Model '{}' loaded in {}ms", denoise.name(), load_elapsed);
+
+    // 恢复模型状态
+    let current_model_name = denoise.name().to_string();
+    if let Ok(states_lock) = saved_model_states.lock() {
+        if let Some(state) = states_lock.get(&current_model_name) {
+            log::info!("Restoring model '{}' state ({} bytes)", current_model_name, state.len());
+            denoise.load_state(state);
+        }
+    }
+    log::info!("Using denoise model: {}", current_model_name);
+
     input_client
         .start_stream()
         .map_err(|e| format!("Failed to start input: {}", e))?;
     output_client
         .start_stream()
         .map_err(|e| format!("Failed to start output: {}", e))?;
-
-    let frame_size = DenoiseState::FRAME_SIZE;
-    let mut denoise = DenoiseState::new();
     let mut first_frame = true;
     let mut input_buffer = vec![0u8; frame_size * 2];
     let mut output_buffer = vec![0u8; frame_size * 4];
@@ -537,8 +640,10 @@ fn audio_loop(
                     input_frame[i] = s as f32;
                 }
 
-                let mut output_frame = [0.0f32; 480];
-                denoise.process_frame(&mut output_frame, &input_frame);
+                let mut output_frame = input_frame; // 默认直通
+                if current_config.enabled {
+                    denoise.process_frame(&mut output_frame, &input_frame);
+                }
 
                 // Skip first frame (fade-in artifact)
                 let output_samples = if first_frame {
@@ -582,6 +687,35 @@ fn audio_loop(
                 } else {
                     mixed_samples
                 };
+
+                // ============ 监听输出：降噪后的音频写入默认播放设备 ============
+                if monitor_enabled.load(Ordering::Relaxed) {
+                    if let Some(ref monitor_render) = monitor_render_opt {
+                        // 等待监听设备准备好（最多 10ms，避免阻塞太长时间）
+                        let monitor_ready = if let Some(ref evt) = monitor_event_opt {
+                            evt.wait_for_event(10).is_ok()
+                        } else {
+                            true // 没有事件句柄就直接写
+                        };
+
+                        if monitor_ready {
+                            // 将 mono f32 samples 转为 stereo i16 写入监听设备
+                            for (i, &sample) in mixed_samples.iter().enumerate() {
+                                let val = (sample.clamp(-32768.0, 32767.0)) as i16;
+                                let bytes = val.to_le_bytes();
+                                monitor_buffer[i * 4] = bytes[0];
+                                monitor_buffer[i * 4 + 1] = bytes[1];
+                                monitor_buffer[i * 4 + 2] = bytes[0];
+                                monitor_buffer[i * 4 + 3] = bytes[1];
+                            }
+                            let _ = monitor_render.write_to_device(
+                                frames_read as usize,
+                                &monitor_buffer[..frames_read as usize * 4],
+                                None,
+                            );
+                        }
+                    }
+                }
 
                 // ============ BGM 混音 ============
                 let final_samples = if bgm_running.load(Ordering::Relaxed) {
@@ -707,8 +841,20 @@ fn audio_loop(
         }
     }
 
+    // 保存该模型的状态（归一化统计），供下次启动时恢复
+    let model_name = denoise.name().to_string();
+    if let Some(state) = denoise.save_state() {
+        log::info!("Saving model '{}' state ({} bytes)", model_name, state.len());
+        if let Ok(mut states_lock) = saved_model_states.lock() {
+            states_lock.insert(model_name, state);
+        }
+    }
+
     input_client.stop_stream().ok();
     output_client.stop_stream().ok();
+    if let Some(m_client) = monitor_client_opt {
+        m_client.stop_stream().ok();
+    }
 
     Ok(())
 }

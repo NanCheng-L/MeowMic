@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 
 export function useAudioEngine() {
-  const startDenoising = async (inputDevice?: string, outputDevice?: string) => {
-    await invoke('start_denoising', { inputDevice, outputDevice })
+  const startDenoising = async (inputDevice?: string, outputDevice?: string, model?: string) => {
+    await invoke('start_denoising', { inputDevice, outputDevice, model })
   }
 
   const stopDenoising = async () => {
@@ -21,11 +21,31 @@ export function useAudioEngine() {
     return await invoke('list_output_devices')
   }
 
+  const listDenoiseModels = async (): Promise<string[]> => {
+    return await invoke('list_denoise_models')
+  }
+
+  const installVBCable = async (): Promise<string> => {
+    return await invoke('install_vb_cable')
+  }
+
+  const setMonitorMode = async (enabled: boolean) => {
+    await invoke('set_monitor_mode', { enabled })
+  }
+
+  const setMonitorDevice = async (device: string | null) => {
+    await invoke('set_monitor_device', { device })
+  }
+
   return {
     startDenoising,
     stopDenoising,
     updateConfig,
     listInputDevices,
     listOutputDevices,
+    listDenoiseModels,
+    installVBCable,
+    setMonitorMode,
+    setMonitorDevice,
   }
 }

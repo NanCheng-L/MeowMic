@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { open } from '@tauri-apps/plugin-shell'
+import { useAudioEngine } from '../composables/useAudioEngine'
+
+const { t } = useI18n()
+const { installVBCable } = useAudioEngine()
 
 const props = defineProps<{
   inputDevices: string[]
@@ -14,6 +19,7 @@ const emit = defineEmits<{
   'update:inputValue': [value: string]
   'update:outputValue': [value: string]
   refresh: []
+  'install-success': []
 }>()
 
 const hasVirtualCable = computed(() => {
@@ -22,7 +28,31 @@ const hasVirtualCable = computed(() => {
   )
 })
 
-const openVBCableDownload = async () => {
+const installing = ref(false)
+const installError = ref('')
+
+const translateError = (msg: string): string => {
+  if (msg.includes('timed out')) return t('device.installTimeout')
+  if (msg.includes('not found')) return t('device.installNotFound')
+  if (msg.includes('UAC') || msg.includes('denied')) return t('device.installDenied')
+  return t('device.installFailed')
+}
+
+const handleInstallVBCable = async () => {
+  installing.value = true
+  installError.value = ''
+  try {
+    await installVBCable()
+    emit('install-success')
+    emit('refresh')
+  } catch (e: any) {
+    installError.value = translateError(e?.toString() || '')
+  } finally {
+    installing.value = false
+  }
+}
+
+const openVBCableWebsite = async () => {
   await open('https://vb-audio.com/Cable/')
 }
 </script>
@@ -30,14 +60,14 @@ const openVBCableDownload = async () => {
 <template>
   <div class="device-selector" :class="{ disabled }">
     <div class="selector-row">
-      <label>输入设备</label>
+      <label>{{ t('device.input') }}</label>
       <div class="select-wrapper">
         <select
           :value="inputValue"
           @change="emit('update:inputValue', ($event.target as HTMLSelectElement).value)"
           :disabled="disabled"
         >
-          <option value="" disabled>选择麦克风</option>
+          <option value="" disabled>{{ t('device.selectInput') }}</option>
           <option v-for="device in inputDevices" :key="device" :value="device">
             {{ device }}
           </option>
@@ -47,14 +77,14 @@ const openVBCableDownload = async () => {
     </div>
 
     <div class="selector-row">
-      <label>输出设备</label>
+      <label>{{ t('device.output') }}</label>
       <div class="select-wrapper">
         <select
           :value="outputValue"
           @change="emit('update:outputValue', ($event.target as HTMLSelectElement).value)"
           :disabled="disabled"
         >
-          <option value="" disabled>选择输出</option>
+          <option value="" disabled>{{ t('device.selectOutput') }}</option>
           <option v-for="device in outputDevices" :key="device" :value="device">
             {{ device }}
           </option>
@@ -71,12 +101,18 @@ const openVBCableDownload = async () => {
     </button>
 
     <p v-if="inputDevices.length === 0 && !disabled" class="empty-hint">
-      未检测到输入设备
+      {{ t('device.noInput') }}
     </p>
 
     <div v-if="!hasVirtualCable && outputDevices.length > 0 && !disabled" class="vb-warning">
-      <span>未检测到虚拟音频设备</span>
-      <a href="#" @click.prevent="openVBCableDownload">点击安装 VB-Cable</a>
+      <span>{{ t('device.noVirtualCable') }}</span>
+      <div class="vb-actions">
+        <a v-if="!installing" href="#" @click.prevent="handleInstallVBCable">{{ t('device.installVBCable') }}</a>
+        <span v-else class="installing-hint">{{ t('device.installing') }}</span>
+        <span class="vb-divider">|</span>
+        <a href="#" @click.prevent="openVBCableWebsite">{{ t('device.downloadVBCable') }}</a>
+      </div>
+      <div v-if="installError" class="install-error">{{ installError }}</div>
     </div>
   </div>
 </template>
@@ -181,6 +217,7 @@ select:disabled {
 
 .vb-warning {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -198,5 +235,27 @@ select:disabled {
 
 .vb-warning a:hover {
   text-decoration: underline;
+}
+
+.installing-hint {
+  color: var(--accent);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.install-error {
+  color: #ef4444;
+  font-size: 11px;
+  width: 100%;
+}
+
+.vb-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vb-divider {
+  color: var(--text-muted);
+  opacity: 0.4;
 }
 </style>

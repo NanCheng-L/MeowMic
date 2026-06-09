@@ -5,12 +5,14 @@ interface AppSettings {
   hotkey: string
   hotkeyEnabled: boolean
   autostart: boolean
+  language: string
 }
 
 const settings = ref<AppSettings>({
   hotkey: 'Ctrl+Shift+D',
   hotkeyEnabled: true,
   autostart: false,
+  language: 'zh-CN',
 })
 
 const loading = ref(false)

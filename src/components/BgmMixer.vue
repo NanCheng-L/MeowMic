@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
+
+const { t } = useI18n()
 
 interface AudioProcess {
   friendly: string
@@ -96,7 +99,7 @@ onMounted(() => {
 <template>
   <div class="bgm-mixer">
     <div class="control-header">
-      <span class="label">BGM 混音</span>
+      <span class="label">{{ t('bgm.label') }}</span>
       <div class="header-right">
         <button class="refresh-btn" @click="refreshProcesses" title="刷新进程列表">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -114,7 +117,7 @@ onMounted(() => {
         </button>
       </div>
     </div>
-    <p class="setting-desc">捕获指定进程的音频混合到麦克风输出</p>
+    <p class="setting-desc">{{ t('bgm.desc') }}</p>
 
     <div class="device-select">
       <select
@@ -123,12 +126,12 @@ onMounted(() => {
         :disabled="!enabled"
         class="device-dropdown"
       >
-        <option :value="0" disabled>选择播放进程...</option>
+        <option :value="0" disabled>{{ t('bgm.selectProcess') }}</option>
         <option v-for="proc in processes" :key="proc.pid" :value="proc.pid">
           {{ proc.friendly }}
         </option>
       </select>
-      <p v-if="processes.length === 0" class="no-process">未检测到音乐播放器进程，请先打开音乐软件</p>
+      <p v-if="processes.length === 0" class="no-process">{{ t('bgm.noProcess') }}</p>
     </div>
 
     <div class="volume-controls">
