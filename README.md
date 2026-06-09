@@ -1,13 +1,14 @@
 # pico-denoise
 
-直播/游戏麦克风降噪桌面应用，基于 WASAPI 实时音频处理。
+> 🎤 实时麦克风降噪桌面应用，为直播和游戏场景打造。
+
+基于 WASAPI 实时音频处理，支持 RNNoise / DeepFilterNet 降噪模型，开箱即用。
 
 ## 功能
 
 - 实时麦克风降噪（WASAPI Shared 模式）
-- 多降噪模型可选（RNNoise / DeepFilterNet3，可扩展）
+- 多降噪模型架构（可扩展）
   - RNNoise：轻量级，擅长去除风扇、空调等持续噪音，CPU 占用极低
-  - DeepFilterNet3：深度学习模型，擅长去除键盘、鼠标等瞬态噪音，语音保真度更高
 - 预设模式（安静/标准/嘈杂/直播 + 自定义）
 - 输入/输出设备选择 + 设备热拔插自动检测
 - 降噪强度可调（0-100%）
@@ -92,3 +93,11 @@ src-tauri/src/          # Rust 后端
 - tauri-plugin-global-shortcut - 全局快捷键
 - tauri-plugin-store - 配置持久化
 - tauri-plugin-autostart - 开机自启动
+
+## 免责声明
+
+- 本软件仅供学习和个人使用，作者不对其造成的任何后果负责
+- 降噪效果因设备和环境而异，不保证在所有场景下均有理想效果
+- 一键炸麦功能仅供娱乐，请勿长时间使用，以免损伤听力或设备
+- VB-Audio Virtual Cable 为第三方软件，其使用遵循其自身的许可协议
+- 本软件不收集任何用户数据，音频处理完全在本地完成
