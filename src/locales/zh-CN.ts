@@ -90,6 +90,7 @@ export default {
   },
   settings: {
     title: '设置',
+    audioDevices: '音频设备',
     hotkey: '全局快捷键',
     hotkeyDesc: '在任何地方按下快捷键即可切换降噪开关',
     hotkeyRecording: '按下快捷键组合...',

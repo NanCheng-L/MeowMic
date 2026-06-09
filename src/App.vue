@@ -1,16 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { listen } from '@tauri-apps/api/event'
+import { listen, emit } from '@tauri-apps/api/event'
 import { useAudioEngine } from './composables/useAudioEngine'
 import { useAudioStats } from './composables/useAudioStats'
 import { useSettings } from './composables/useSettings'
+import { setLocale } from './locales'
 import DeviceSelector from './components/DeviceSelector.vue'
 import DenoiseControl from './components/DenoiseControl.vue'
 import AudioMeter from './components/AudioMeter.vue'
 import SpectrumVisualizer from './components/SpectrumVisualizer.vue'
 import StatusBadge from './components/StatusBadge.vue'
-import SettingsDialog from './components/SettingsDialog.vue'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import BgmMixer from './components/BgmMixer.vue'
 import ExplodeButton from './components/ExplodeButton.vue'
@@ -19,7 +19,7 @@ const { t } = useI18n()
 
 const { startDenoising, stopDenoising, updateConfig, listInputDevices, listOutputDevices, listDenoiseModels, setMonitorMode, setMonitorDevice } = useAudioEngine()
 const { stats, startPolling, stopPolling } = useAudioStats()
-const { loadSettings } = useSettings()
+const { settings, loadSettings } = useSettings()
 
 const inputDevices = ref<string[]>([])
 const outputDevices = ref<string[]>([])
@@ -29,16 +29,22 @@ const isRunning = ref(false)
 const denoiseEnabled = ref(true)
 const denoiseStrength = ref(0.8)
 const isLoading = ref(false)
-const showSettings = ref(false)
 
 const openTutorial = async () => {
   const existing = await WebviewWindow.getByLabel('tutorial')
   if (existing) {
-    await existing.setFocus()
-    return
+    try {
+      await existing.show()
+      await existing.setFocus()
+      return
+    } catch {
+      // 窗口已销毁，重新创建
+    }
   }
+  const isDev = location.hostname === 'localhost'
+  const baseUrl = isDev ? 'http://localhost:1420' : 'tauri://localhost'
   new WebviewWindow('tutorial', {
-    url: '/tutorial.html',
+    url: `${baseUrl}/tutorial.html`,
     title: '使用教程 - pico-denoise',
     width: 520,
     height: 640,
@@ -46,6 +52,63 @@ const openTutorial = async () => {
     resizable: true,
   })
 }
+
+const openSettings = async () => {
+  const existing = await WebviewWindow.getByLabel('settings')
+  if (existing) {
+    try {
+      await existing.show()
+      await existing.setFocus()
+      // 发送最新配置
+      await emit('settings-init', {
+        selectedInput: selectedInput.value,
+        selectedOutput: selectedOutput.value,
+        selectedModel: selectedModel.value,
+        monitorEnabled: monitorEnabled.value,
+        monitorDevice: monitorDevice.value,
+        inputDevices: inputDevices.value,
+        outputDevices: outputDevices.value,
+        availableModels: availableModels.value,
+        hotkey: settings.value.hotkey,
+        hotkeyEnabled: settings.value.hotkeyEnabled,
+        autostart: settings.value.autostart,
+        language: localStorage.getItem('pico-denoise-lang') || 'zh-CN',
+      })
+      return
+    } catch {
+      // 窗口引用已失效，重新创建
+    }
+  }
+  const isDev = location.hostname === 'localhost'
+  const baseUrl = isDev ? 'http://localhost:1420' : 'tauri://localhost'
+  new WebviewWindow('settings', {
+    url: `${baseUrl}/settings.html`,
+    title: '设置 - pico-denoise',
+    width: 480,
+    height: 580,
+    center: true,
+    resizable: true,
+  })
+  setTimeout(async () => {
+    try {
+      await emit('settings-init', {
+        selectedInput: selectedInput.value,
+        selectedOutput: selectedOutput.value,
+        selectedModel: selectedModel.value,
+        monitorEnabled: monitorEnabled.value,
+        monitorDevice: monitorDevice.value,
+        inputDevices: inputDevices.value,
+        outputDevices: outputDevices.value,
+        availableModels: availableModels.value,
+        hotkey: settings.value.hotkey,
+        hotkeyEnabled: settings.value.hotkeyEnabled,
+        autostart: settings.value.autostart,
+        language: localStorage.getItem('pico-denoise-lang') || 'zh-CN',
+      })
+    } catch {}
+  }, 300)
+}
+
 const selectedModel = ref('RNNoise')
 const availableModels = ref<string[]>([])
 const selectedPreset = ref('standard')
@@ -253,12 +316,43 @@ const toggleDenoise = async () => {
   await handleEnabledChange(!denoiseEnabled.value)
 }
 
-watch([selectedInput, selectedOutput], () => {
+// 应用设置窗口发来的变更
+const handleApplySettings = async (payload: {
+  selectedInput?: string
+  selectedOutput?: string
+  selectedModel?: string
+  monitorEnabled?: boolean
+  monitorDevice?: string
+}) => {
+  let needRestart = false
+
+  if (payload.selectedInput !== undefined && payload.selectedInput !== selectedInput.value) {
+    selectedInput.value = payload.selectedInput
+    needRestart = true
+  }
+  if (payload.selectedOutput !== undefined && payload.selectedOutput !== selectedOutput.value) {
+    selectedOutput.value = payload.selectedOutput
+    needRestart = true
+  }
+  if (payload.selectedModel !== undefined && payload.selectedModel !== selectedModel.value) {
+    selectedModel.value = payload.selectedModel
+    needRestart = true
+  }
+  if (payload.monitorEnabled !== undefined) {
+    monitorEnabled.value = payload.monitorEnabled
+    try { await setMonitorMode(payload.monitorEnabled) } catch {}
+  }
+  if (payload.monitorDevice !== undefined) {
+    monitorDevice.value = payload.monitorDevice
+    try { await setMonitorDevice(payload.monitorDevice) } catch {}
+  }
+
   saveConfig()
-  if (initialized && isRunning.value) {
+
+  if (needRestart && isRunning.value) {
     scheduleRestart(100)
   }
-})
+}
 
 watch([denoiseEnabled, denoiseStrength], () => {
   updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value })
@@ -319,6 +413,20 @@ onMounted(async () => {
     // debounce restart — 快速插拔只触发一次
     scheduleRestart(500)
   })
+
+  // 轮询检测设置窗口的变更（localStorage 通信，避免跨窗口 emit 问题）
+  setInterval(() => {
+    try {
+      const raw = localStorage.getItem('pico-denoise-pending')
+      if (!raw) return
+      const pending = JSON.parse(raw)
+      localStorage.removeItem('pico-denoise-pending')
+      handleApplySettings(pending)
+      // 语言切换
+      const lang = localStorage.getItem('pico-denoise-lang')
+      if (lang) setLocale(lang)
+    } catch {}
+  }, 1000)
 })
 
 onUnmounted(() => {
@@ -346,13 +454,13 @@ onUnmounted(() => {
       </div>
       <div class="header-right">
         <button class="settings-btn" @click="openTutorial" :title="t('tutorial.title')">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
             <line x1="12" y1="17" x2="12.01" y2="17"/>
           </svg>
         </button>
-        <button class="settings-btn" @click="showSettings = true" :title="t('settings.title')">
+        <button class="settings-btn" @click="openSettings" :title="t('settings.title')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -430,8 +538,6 @@ onUnmounted(() => {
         </div>
       </section>
     </main>
-
-    <SettingsDialog :open="showSettings" @close="showSettings = false" />
   </div>
 </template>
 

@@ -90,6 +90,7 @@ export default {
   },
   settings: {
     title: 'Settings',
+    audioDevices: 'Audio Devices',
     hotkey: 'Global Hotkey',
     hotkeyDesc: 'Press the hotkey anywhere to toggle denoise',
     hotkeyRecording: 'Press key combination...',

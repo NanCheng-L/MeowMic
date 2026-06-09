@@ -25,7 +25,7 @@ cargo check             # 检查 Rust 编译（在 src-tauri/ 下）
 
 ```
 src/                    # Vue 前端
-  components/           # UI 组件
+  components/           # UI 组件（SettingsPage / TutorialPage 等独立窗口组件）
   composables/          # Vue 组合式函数
   locales/              # 多语言翻译（zh-CN.ts / en.ts / index.ts）
 src-tauri/src/          # Rust 后端
@@ -59,6 +59,8 @@ src-tauri/src/          # Rust 后端
 - **VB-Audio Cable 驱动安装**：打包时必须包含完整驱动包（.inf + .sys + .cat + ARM64 .sys），缺少任一文件会导致安装静默失败；用 `ShellExecuteW` + `"runas"` 触发 UAC 提权，`Command::new()` 不会自动提权会报 os error 740；安装后 WASAPI 设备列表可能有缓存延迟，需重启应用才能检测到新设备
 - **Tauri dev 资源目录**：`app.path().resource_dir()` 在 dev 模式指向 `target/debug/`，需 fallback 到 `CARGO_MANIFEST_DIR/resources/models`（模型）和 `resources/vb-cable`（驱动）
 - **WASAPI 多设备输出**：监听功能需要同时向两个设备写入音频，每个 WASAPI render client 必须独立设置事件句柄（`set_get_eventhandle`）并在写入前 `wait_for_event`，否则会出现 `0x88890006`（`AUDCLNT_BUFFER_OVERFLOW`）缓冲区溢出错误，导致无声
+- **WASAPI 监听格式**：监听设备不能复用主输出的 `output_format`（可能是 32-bit float），必须用固定 `WaveFormat::new(16, 16, &SampleType::Int, ...)` 初始化，因为写入代码固定按 i16 处理。格式不匹配会导致无声
+- **Tauri WebviewWindow**：构造函数 `new WebviewWindow(label, opts)` 没有 `.on()` 方法，用 `.listen()` 或 `.once()`；创建独立窗口需要在 `capabilities/default.json` 添加窗口名到 `windows` 数组并声明 `core:webview:allow-create-webview-window` 权限；窗口关闭用 `hide()` 代替 `close()` 避免 label 无法释放导致再次创建失败
 
 ## 红线
 

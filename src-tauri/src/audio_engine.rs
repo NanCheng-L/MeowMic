@@ -84,7 +84,7 @@ impl AudioEngine {
             bgm_sender: bgm_tx,
             bgm_receiver: bgm_rx,
             explode_enabled: Arc::new(AtomicBool::new(false)),
-            explode_intensity: Arc::new(AtomicU32::new(75)),
+            explode_intensity: Arc::new(AtomicU32::new(50)),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
             monitor_device_name: Arc::new(RwLock::new(None)),
             thread_handle: std::sync::Mutex::new(None),
@@ -583,7 +583,10 @@ fn audio_loop(
     let mut monitor_client_opt: Option<AudioClient> = None;
     let mut monitor_render_opt: Option<AudioRenderClient> = None;
     let mut monitor_event_opt: Option<wasapi::Handle> = None;
-    let mut monitor_buffer = vec![0u8; frame_size * 4];
+    let monitor_format = WaveFormat::new(16, 16, &SampleType::Int, output_sample_rate as usize, 2, None);
+    // 监听缓冲区：考虑重采样后可能变大（最高 192kHz → 4x）
+    let monitor_max_frames = frame_size * (output_sample_rate as usize / 48000 + 1);
+    let mut monitor_buffer = vec![0u8; monitor_max_frames * 2 * 2]; // stereo i16
 
     if let Some(ref m_device_name) = monitor_device {
         if let Ok(monitor_output) = find_device(Some(m_device_name), false) {
@@ -592,7 +595,7 @@ fn audio_loop(
                 if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
                     let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
                     if m_client.initialize_client(
-                        &output_format,
+                        &monitor_format,
                         def_time,
                         &Direction::Render,
                         &ShareMode::Shared,
@@ -602,7 +605,7 @@ fn audio_loop(
                         if let Ok(render) = m_client.get_audiorenderclient() {
                             let evt = m_client.set_get_eventhandle();
                             if m_client.start_stream().is_ok() {
-                                log::info!("Monitor started: {}", monitor_output_name);
+                                log::info!("Monitor started: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
                                 monitor_render_opt = Some(render);
                                 monitor_event_opt = evt.ok();
                                 monitor_client_opt = Some(m_client);
@@ -728,8 +731,10 @@ fn audio_loop(
                     // ============ 💥 爆炸模式：方波失真 ============
                     let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
                         let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
-                        let gain = 1.0 + (intensity / 100.0).powf(0.6) * 49.0;
-                        let clip = 32000.0 - (intensity / 100.0).powf(1.5) * 31800.0;
+                        // 映射 0-100 → 50-100，0% 时就有明显效果
+                        let mapped = 50.0 + intensity * 0.5;
+                        let gain = 1.0 + (mapped / 100.0).powf(0.6) * 49.0;
+                        let clip = 32000.0 - (mapped / 100.0).powf(1.5) * 31800.0;
                         mixed_samples
                             .iter()
                             .map(|&s| {
@@ -751,14 +756,21 @@ fn audio_loop(
                                 true
                             };
                             if monitor_ready {
-                                let monitor_stereo = upmix_to_stereo(&mixed_samples, 2);
+                                // 重采样到监听设备采样率
+                                let monitor_resampled = if output_sample_rate != 48000 {
+                                    resample_linear(&mixed_samples, 48000, output_sample_rate)
+                                } else {
+                                    mixed_samples.clone()
+                                };
+                                let monitor_stereo = upmix_to_stereo(&monitor_resampled, 2);
+                                // monitor_stereo 已是交错立体声 [L0,R0,L1,R1,...]，直接写入
                                 for (i, &sample) in monitor_stereo.iter().enumerate() {
                                     let val = (sample.clamp(-32768.0, 32767.0)) as i16;
                                     let bytes = val.to_le_bytes();
                                     monitor_buffer[i * 2] = bytes[0];
                                     monitor_buffer[i * 2 + 1] = bytes[1];
                                 }
-                                let monitor_frames = (mixed_samples.len()).min(frames_read as usize);
+                                let monitor_frames = monitor_resampled.len();
                                 let _ = monitor_render.write_to_device(
                                     monitor_frames,
                                     &monitor_buffer[..monitor_frames * 4],

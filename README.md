@@ -16,8 +16,10 @@
 - 全局快捷键（可自定义，后台/最小化均可触发）
 - 开机自启动
 - BGM 混音（按进程捕获音乐播放器音频，混合到麦克风输出）
-- 一键炸麦（恶搞模式，50x 增益 + 方波失真，10 秒自动关闭）
-- 设置界面（快捷键配置、开机自启开关、语言切换）
+- 一键炸麦（恶搞模式，增益 + 方波失真，强度可调 1-100%）
+- 监听模式（通过耳机听到自己降噪后的声音）
+- 设置界面（独立窗口，快捷键配置、开机自启开关、语言切换）
+- 使用教程（独立窗口，设备说明 + FAQ + 社交链接）
 - VB-Audio Virtual Cable 虚拟设备引导
 - 多语言支持（中文 / English）
 
@@ -61,7 +63,8 @@ src/                    # Vue 3 前端
 │   ├── DenoiseControl  # 降噪控制
 │   ├── DeviceSelector  # 设备选择
 │   ├── ExplodeButton   # 一键炸麦
-│   ├── SettingsDialog  # 设置界面
+│   ├── SettingsPage    # 设置界面（独立窗口）
+│   ├── TutorialPage    # 使用教程（独立窗口）
 │   ├── SpectrumVisualizer # 频谱可视化
 │   └── StatusBadge     # 状态徽章
 ├── composables/        # 组合式函数
