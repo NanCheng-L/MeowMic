@@ -11,7 +11,7 @@ import AudioMeter from './components/AudioMeter.vue'
 import SpectrumVisualizer from './components/SpectrumVisualizer.vue'
 import StatusBadge from './components/StatusBadge.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
-import TutorialDialog from './components/TutorialDialog.vue'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import BgmMixer from './components/BgmMixer.vue'
 import ExplodeButton from './components/ExplodeButton.vue'
 
@@ -30,7 +30,22 @@ const denoiseEnabled = ref(true)
 const denoiseStrength = ref(0.8)
 const isLoading = ref(false)
 const showSettings = ref(false)
-const showTutorial = ref(false)
+
+const openTutorial = async () => {
+  const existing = await WebviewWindow.getByLabel('tutorial')
+  if (existing) {
+    await existing.setFocus()
+    return
+  }
+  new WebviewWindow('tutorial', {
+    url: '/tutorial.html',
+    title: '使用教程 - pico-denoise',
+    width: 520,
+    height: 640,
+    center: true,
+    resizable: true,
+  })
+}
 const selectedModel = ref('RNNoise')
 const availableModels = ref<string[]>([])
 const selectedPreset = ref('standard')
@@ -330,7 +345,7 @@ onUnmounted(() => {
         <h1>pico-denoise</h1>
       </div>
       <div class="header-right">
-        <button class="settings-btn" @click="showTutorial = true" :title="t('tutorial.title')">
+        <button class="settings-btn" @click="openTutorial" :title="t('tutorial.title')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/>
             <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
@@ -417,7 +432,6 @@ onUnmounted(() => {
     </main>
 
     <SettingsDialog :open="showSettings" @close="showSettings = false" />
-    <TutorialDialog :open="showTutorial" @close="showTutorial = false" />
   </div>
 </template>
 
@@ -470,6 +484,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: visible;
 }
 
 .settings-btn:hover {
