@@ -38,21 +38,25 @@ const handleToggle = async (val: boolean) => {
   loading.value = true
   try {
     if (val) {
+      // 没有进程时先开开关，等选了进程再混音
       if (!selectedPid.value) {
-        // 默认选第一个
         if (processes.value.length > 0) {
           selectedPid.value = processes.value[0].pid
           selectedName.value = processes.value[0].name
-        } else {
-          loading.value = false
-          return
+          await invoke('start_bgm', {
+            processName: selectedName.value,
+            pid: selectedPid.value,
+          })
         }
+        // 没进程也开开关，只是不调 start_bgm
+        enabled.value = true
+      } else {
+        await invoke('start_bgm', {
+          processName: selectedName.value,
+          pid: selectedPid.value,
+        })
+        enabled.value = true
       }
-      await invoke('start_bgm', {
-        processName: selectedName.value,
-        pid: selectedPid.value,
-      })
-      enabled.value = true
     } else {
       await invoke('stop_bgm')
       enabled.value = false
@@ -69,14 +73,15 @@ const handleProcessChange = async () => {
   if (proc) {
     selectedName.value = proc.name
   }
-  if (enabled.value) {
-    await invoke('stop_bgm')
-    if (selectedPid.value) {
-      await invoke('start_bgm', {
-        processName: selectedName.value,
-        pid: selectedPid.value,
-      })
-    }
+  if (enabled.value && selectedPid.value) {
+    // 如果之前没启动过（无进程时开的开关），直接启动；否则重启
+    try {
+      await invoke('stop_bgm')
+    } catch {}
+    await invoke('start_bgm', {
+      processName: selectedName.value,
+      pid: selectedPid.value,
+    })
   }
 }
 

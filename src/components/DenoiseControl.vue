@@ -24,8 +24,6 @@ const props = defineProps<{
   preset: string
   loading: boolean
   monitorEnabled: boolean
-  monitorDevices: string[]
-  monitorDevice: string
 }>()
 
 const emit = defineEmits<{
@@ -34,7 +32,6 @@ const emit = defineEmits<{
   'update:model': [value: string]
   'update:preset': [value: string]
   'update:monitorEnabled': [value: boolean]
-  'update:monitorDevice': [value: string]
 }>()
 
 // 当前预设是否匹配某个内置预设
@@ -126,22 +123,6 @@ const handleSliderInput = (e: Event) => {
       </button>
     </div>
     <p class="monitor-desc">{{ t('denoise.monitorDesc') }}</p>
-
-    <div v-if="monitorEnabled" class="monitor-device-section">
-      <label class="monitor-device-label">{{ t('device.selectMonitor') }}</label>
-      <div class="select-wrapper">
-        <select
-          :value="monitorDevice"
-          @change="emit('update:monitorDevice', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="" disabled>{{ t('device.selectMonitor') }}</option>
-          <option v-for="device in monitorDevices" :key="device" :value="device">
-            {{ device }}
-          </option>
-        </select>
-        <span class="select-arrow"></span>
-      </div>
-    </div>
 
     <p v-if="enabled && model" class="model-desc">{{ t(`denoise.desc.${model}`) }}</p>
 

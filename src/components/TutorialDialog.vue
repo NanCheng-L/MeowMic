@@ -235,7 +235,7 @@ const handleClose = () => {
   height: 24px;
   border-radius: 50%;
   background: var(--accent);
-  color: #000;
+  color: white;
   font-size: 12px;
   font-weight: 700;
   display: flex;
@@ -381,7 +381,7 @@ const handleClose = () => {
 
 .btn-primary {
   background: var(--accent);
-  color: #000;
+  color: white;
 }
 
 .btn-primary:hover {

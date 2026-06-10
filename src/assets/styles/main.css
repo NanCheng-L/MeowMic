@@ -3,10 +3,26 @@
   --surface: #111111;
   --border: #1e1e1e;
   --text-primary: #e5e5e5;
+  --text-secondary: #999999;
   --text-muted: #666666;
   --accent: #10b981;
+  --success: #10b981;
   --danger: #ef4444;
   --warning: #f59e0b;
+}
+
+/* 暖色浅色主题 — 奶油白 + 橘色强调 */
+:root[data-theme="light"] {
+  --bg: #F5EDE4;
+  --surface: #FFFFFF;
+  --border: #C8B8A5;
+  --text-primary: #1A1008;
+  --text-secondary: #4A3D30;
+  --text-muted: #7A6A58;
+  --accent: #D97A3C;
+  --success: #16a34a;
+  --danger: #DC2626;
+  --warning: #B45309;
 }
 
 * {

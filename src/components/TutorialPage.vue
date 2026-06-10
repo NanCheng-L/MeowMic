@@ -1,7 +1,23 @@
 <script setup lang="ts">
+import { onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useTheme } from '../composables/useTheme'
+import { setLocale } from '../locales'
 
 const { t } = useI18n()
+useTheme()
+
+// 轮询语言变更
+let timer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  timer = setInterval(() => {
+    const lang = localStorage.getItem('meowmic-lang')
+    if (lang) setLocale(lang)
+  }, 1000)
+})
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+})
 </script>
 
 <template>
@@ -117,6 +133,10 @@ const { t } = useI18n()
 .tutorial-header {
   padding: 24px 28px 16px;
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
 }
 
 .tutorial-header h1 {
@@ -172,7 +192,7 @@ const { t } = useI18n()
   height: 28px;
   border-radius: 50%;
   background: var(--accent);
-  color: #000;
+  color: white;
   font-size: 13px;
   font-weight: 700;
   display: flex;
@@ -312,13 +332,13 @@ body::-webkit-scrollbar {
   width: 6px;
 }
 body::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: var(--bg);
 }
 body::-webkit-scrollbar-thumb {
-  background: #1e1e1e;
+  background: var(--border);
   border-radius: 3px;
 }
 body::-webkit-scrollbar-thumb:hover {
-  background: #666666;
+  background: var(--text-muted);
 }
 </style>

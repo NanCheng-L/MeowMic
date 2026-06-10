@@ -88,6 +88,7 @@ fn start_denoising(
     input_device: Option<String>,
     output_device: Option<String>,
     model: Option<String>,
+    monitor_enabled: Option<bool>,
 ) -> Result<(), String> {
     // 优先用 Tauri 资源目录（build 模式），fallback 到源码目录（dev 模式）
     let resource_dir = app.path().resource_dir().ok().map(|d| {
@@ -100,7 +101,7 @@ fn start_denoising(
         }
     });
     let engine = state.engine.lock();
-    engine.start(input_device, output_device, model, resource_dir)
+    engine.start(input_device, output_device, model, resource_dir, monitor_enabled.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -341,13 +342,6 @@ fn set_monitor_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), 
 }
 
 #[tauri::command]
-fn set_monitor_device(state: State<'_, EngineState>, device: Option<String>) -> Result<(), String> {
-    let engine = state.engine.lock();
-    engine.set_monitor_device(device);
-    Ok(())
-}
-
-#[tauri::command]
 fn list_denoise_models() -> Vec<&'static str> {
     denoise::list_models()
 }
@@ -389,7 +383,6 @@ pub fn run() {
             update_bgm_config,
             set_explode_mode,
             set_monitor_mode,
-            set_monitor_device,
             list_denoise_models,
             install_vb_cable,
         ])
@@ -474,7 +467,7 @@ pub fn run() {
             // 启动设备热拔插检测
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
-                device_watcher::start_device_watcher(app_handle, 3);
+                device_watcher::start_device_watcher(app_handle, 500);
             });
 
             Ok(())

@@ -103,8 +103,12 @@ export default {
     autoUpdateDesc: 'Automatically check and install new versions',
     save: 'Save',
     saving: 'Saving...',
+    saveHint: 'Device and hotkey settings require saving',
     hotkeyError: 'Hotkey registration failed, may conflict with another hotkey',
     modifierError: 'At least one modifier key required (Ctrl/Shift/Alt/Win)',
     language: 'Language',
+    theme: 'Theme',
+    themeDark: 'Dark',
+    themeLight: 'Light',
   },
 }

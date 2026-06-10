@@ -28,7 +28,7 @@ fn enumerate_devices(direction: &wasapi::Direction) -> HashSet<String> {
     set
 }
 
-pub fn start_device_watcher(app_handle: AppHandle, interval_secs: u64) {
+pub fn start_device_watcher(app_handle: AppHandle, interval_ms: u64) {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = stop_flag.clone();
 
@@ -42,7 +42,7 @@ pub fn start_device_watcher(app_handle: AppHandle, interval_secs: u64) {
             let mut prev_output = enumerate_devices(&wasapi::Direction::Render);
 
             loop {
-                std::thread::sleep(Duration::from_secs(interval_secs));
+                std::thread::sleep(Duration::from_millis(interval_ms));
 
                 if stop_flag_clone.load(Ordering::Relaxed) {
                     break;

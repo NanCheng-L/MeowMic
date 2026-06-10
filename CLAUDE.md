@@ -26,8 +26,11 @@ cargo check             # 检查 Rust 编译（在 src-tauri/ 下）
 ```
 src/                    # Vue 前端
   components/           # UI 组件（SettingsPage / TutorialPage 等独立窗口组件）
-  composables/          # Vue 组合式函数
+  composables/          # Vue 组合式函数（useTheme / useSettings / useAudioEngine 等）
   locales/              # 多语言翻译（zh-CN.ts / en.ts / index.ts）
+  main.ts               # 主窗口入口
+  settings-main.ts      # 设置窗口入口（必须导入 main.css）
+  tutorial-main.ts      # 教程窗口入口
 src-tauri/src/          # Rust 后端
   audio_engine.rs       # WASAPI 音频引擎
   denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs）
@@ -49,7 +52,7 @@ src-tauri/src/          # Rust 后端
 - **WASAPI 线程管理**：`stop()` 必须 `join()` 等音频线程退出再返回，否则旧流残留会产生回音。BGM 线程同理
 - **Tauri 字段命名**：Rust 端 `AppSettings` 用 snake_case 字段名 + `#[serde(rename_all = "camelCase")]`，前端用 camelCase，Tauri 通过 serde 做转换
 - **设备热拔插**：`wasapi` crate 不支持 `IMMNotificationClient`，用后台轮询枚举设备列表 + 哈希比对实现
-- **多语言**：使用 vue-i18n，语言偏好同时存 localStorage（前端即时切换）和 tauri-plugin-store（Rust 端持久化）
+- **多语言**：使用 vue-i18n，语言偏好存 localStorage，选择后即时切换（不需要点保存），主窗口和教程窗口通过 setInterval 轮询同步
 - **nnnoiseless DenoiseState**：`new()` 返回 `Box<DenoiseState<'static>>`，结构体有 phantom lifetime 参数 `'a`，字段类型需用 `Box<DenoiseState<'static>>`
 - **前端引擎重启竞争**：设备切换、热拔插、模型切换都会触发 stop+start，多条路径并发调用导致 "Engine is already running"。必须用统一的 debounce restart 函数 + 锁；Vite HMR 重载时前端 ref 重置但 Rust 引擎仍在跑，`handleStart` 需捕获 `already running` 并同步状态
 - **deep_filter crate lib 名**：Cargo.toml 包名是 `deep_filter`，但 `[lib] name = "df"`，代码中必须 `use df::DFState`，不能 `use deep_filter::DFState`
@@ -60,7 +63,13 @@ src-tauri/src/          # Rust 后端
 - **Tauri dev 资源目录**：`app.path().resource_dir()` 在 dev 模式指向 `target/debug/`，需 fallback 到 `CARGO_MANIFEST_DIR/resources/models`（模型）和 `resources/vb-cable`（驱动）
 - **WASAPI 多设备输出**：监听功能需要同时向两个设备写入音频，每个 WASAPI render client 必须独立设置事件句柄（`set_get_eventhandle`）并在写入前 `wait_for_event`，否则会出现 `0x88890006`（`AUDCLNT_BUFFER_OVERFLOW`）缓冲区溢出错误，导致无声
 - **WASAPI 监听格式**：监听设备不能复用主输出的 `output_format`（可能是 32-bit float），必须用固定 `WaveFormat::new(16, 16, &SampleType::Int, ...)` 初始化，因为写入代码固定按 i16 处理。格式不匹配会导致无声
+- **WASAPI 共享模式默认端点**：共享模式下音频流绑定系统默认端点，拔耳机/切换默认设备会中断流。设备热拔插触发重启可恢复，但有短暂间隙
 - **Tauri WebviewWindow**：构造函数 `new WebviewWindow(label, opts)` 没有 `.on()` 方法，用 `.listen()` 或 `.once()`；创建独立窗口需要在 `capabilities/default.json` 添加窗口名到 `windows` 数组并声明 `core:webview:allow-create-webview-window` 权限；窗口关闭用 `hide()` 代替 `close()` 避免 label 无法释放导致再次创建失败
+- **Tauri 图标更新不生效**：替换 `icons/` 目录下的图标文件后，`pnpm tauri dev` 可能仍显示旧图标。需要清除 cargo 编译缓存（`cargo clean` 或删除 `src-tauri/target/`）再重新编译，图标才会更新。单纯重启 dev 服务不够
+- **多窗口 CSS 变量**：Tauri 每个窗口是独立 webview，各有自己的 JS 上下文。每个窗口的入口文件（`settings-main.ts`、`tutorial-main.ts`）必须导入 `main.css`，否则 CSS 变量不生效；需要调用 `useTheme()` 才会读取/应用主题
+- **多窗口状态同步**：`localStorage` 的 `storage` 事件不会在同一文档中触发，只能跨窗口。同一窗口内的状态变更通过 Vue 响应式 ref 共享；跨窗口通过 Tauri 事件（`emit`/`listen`）或 `setInterval` 轮询 localStorage
+- **WASAPI 监听停止**：关闭监听时仅跳过写入不够，WASAPI 缓冲区残余音频会继续播放。必须调用 `stop_stream()` 立即停止，并用 `monitor_was_streaming` 标记避免每帧重复 stop/start
+- **BGM 混音开关**：无进程时应允许打开开关（仅不启动混音），选中进程后自动开始。否则用户会误以为功能损坏
 
 ## 红线
 

@@ -5,6 +5,7 @@ import { listen, emit } from '@tauri-apps/api/event'
 import { useAudioEngine } from './composables/useAudioEngine'
 import { useAudioStats } from './composables/useAudioStats'
 import { useSettings } from './composables/useSettings'
+import { useTheme } from './composables/useTheme'
 import { setLocale } from './locales'
 import DeviceSelector from './components/DeviceSelector.vue'
 import DenoiseControl from './components/DenoiseControl.vue'
@@ -17,9 +18,10 @@ import ExplodeButton from './components/ExplodeButton.vue'
 
 const { t } = useI18n()
 
-const { startDenoising, stopDenoising, updateConfig, listInputDevices, listOutputDevices, listDenoiseModels, setMonitorMode, setMonitorDevice } = useAudioEngine()
+const { startDenoising, stopDenoising, updateConfig, listInputDevices, listOutputDevices, listDenoiseModels, setMonitorMode } = useAudioEngine()
 const { stats, startPolling, stopPolling } = useAudioStats()
 const { settings, loadSettings } = useSettings()
+const { theme } = useTheme()
 
 const inputDevices = ref<string[]>([])
 const outputDevices = ref<string[]>([])
@@ -65,7 +67,6 @@ const openSettings = async () => {
         selectedOutput: selectedOutput.value,
         selectedModel: selectedModel.value,
         monitorEnabled: monitorEnabled.value,
-        monitorDevice: monitorDevice.value,
         inputDevices: inputDevices.value,
         outputDevices: outputDevices.value,
         availableModels: availableModels.value,
@@ -73,6 +74,7 @@ const openSettings = async () => {
         hotkeyEnabled: settings.value.hotkeyEnabled,
         autostart: settings.value.autostart,
         language: localStorage.getItem('meowmic-lang') || 'zh-CN',
+        theme: theme.value,
       })
       return
     } catch {
@@ -96,7 +98,6 @@ const openSettings = async () => {
         selectedOutput: selectedOutput.value,
         selectedModel: selectedModel.value,
         monitorEnabled: monitorEnabled.value,
-        monitorDevice: monitorDevice.value,
         inputDevices: inputDevices.value,
         outputDevices: outputDevices.value,
         availableModels: availableModels.value,
@@ -104,6 +105,7 @@ const openSettings = async () => {
         hotkeyEnabled: settings.value.hotkeyEnabled,
         autostart: settings.value.autostart,
         language: localStorage.getItem('meowmic-lang') || 'zh-CN',
+        theme: theme.value,
       })
     } catch {}
   }, 300)
@@ -113,7 +115,6 @@ const selectedModel = ref('RNNoise')
 const availableModels = ref<string[]>([])
 const selectedPreset = ref('standard')
 const monitorEnabled = ref(false)
-const monitorDevice = ref('')
 const explodeIntensity = ref(0.75)
 const explodeEnabled = ref(false)
 
@@ -135,7 +136,6 @@ const loadConfig = () => {
       if (config.selectedModel) selectedModel.value = config.selectedModel
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
-      if (config.monitorDevice) monitorDevice.value = config.monitorDevice
       if (config.explodeIntensity !== undefined) explodeIntensity.value = config.explodeIntensity
     }
   } catch (e) {
@@ -153,7 +153,6 @@ const saveConfig = () => {
       selectedModel: selectedModel.value,
       selectedPreset: selectedPreset.value,
       monitorEnabled: monitorEnabled.value,
-      monitorDevice: monitorDevice.value,
       explodeIntensity: explodeIntensity.value,
     }))
   } catch (e) {
@@ -203,16 +202,14 @@ const handleStart = async () => {
   }
   isLoading.value = true
   try {
-    await startDenoising(selectedInput.value, selectedOutput.value, selectedModel.value)
+    await startDenoising(
+      selectedInput.value,
+      selectedOutput.value,
+      selectedModel.value,
+      monitorEnabled.value
+    )
     isRunning.value = true
     startPolling()
-    // 同步监听模式到后端
-    if (monitorEnabled.value) {
-      await setMonitorMode(true)
-      if (monitorDevice.value) {
-        await setMonitorDevice(monitorDevice.value)
-      }
-    }
   } catch (e) {
     const msg = String(e)
     // HMR 热重载后前端状态重置但 Rust 引擎仍在运行，同步状态
@@ -292,22 +289,8 @@ const handleMonitorChange = async (enabled: boolean) => {
   saveConfig()
   try {
     await setMonitorMode(enabled)
-    // 同步监听设备到后端
-    if (enabled && monitorDevice.value) {
-      await setMonitorDevice(monitorDevice.value)
-    }
   } catch (e) {
     console.error('Failed to set monitor mode:', e)
-  }
-}
-
-const handleMonitorDeviceChange = async (device: string) => {
-  monitorDevice.value = device
-  saveConfig()
-  try {
-    await setMonitorDevice(device)
-  } catch (e) {
-    console.error('Failed to set monitor device:', e)
   }
 }
 
@@ -322,7 +305,6 @@ const handleApplySettings = async (payload: {
   selectedOutput?: string
   selectedModel?: string
   monitorEnabled?: boolean
-  monitorDevice?: string
 }) => {
   let needRestart = false
 
@@ -341,10 +323,6 @@ const handleApplySettings = async (payload: {
   if (payload.monitorEnabled !== undefined) {
     monitorEnabled.value = payload.monitorEnabled
     try { await setMonitorMode(payload.monitorEnabled) } catch {}
-  }
-  if (payload.monitorDevice !== undefined) {
-    monitorDevice.value = payload.monitorDevice
-    try { await setMonitorDevice(payload.monitorDevice) } catch {}
   }
 
   saveConfig()
@@ -411,18 +389,20 @@ onMounted(async () => {
     }
 
     // debounce restart — 快速插拔只触发一次
-    scheduleRestart(500)
+    scheduleRestart(100)
   })
 
   // 轮询检测设置窗口的变更（localStorage 通信，避免跨窗口 emit 问题）
   setInterval(() => {
     try {
+      // 设备/模型等设置变更
       const raw = localStorage.getItem('meowmic-pending')
-      if (!raw) return
-      const pending = JSON.parse(raw)
-      localStorage.removeItem('meowmic-pending')
-      handleApplySettings(pending)
-      // 语言切换
+      if (raw) {
+        const pending = JSON.parse(raw)
+        localStorage.removeItem('meowmic-pending')
+        handleApplySettings(pending)
+      }
+      // 语言切换（独立检查，不受 pending 限制）
       const lang = localStorage.getItem('meowmic-lang')
       if (lang) setLocale(lang)
     } catch {}
@@ -491,14 +471,11 @@ onUnmounted(() => {
           :preset="selectedPreset"
           :loading="isLoading"
           :monitor-enabled="monitorEnabled"
-          :monitor-devices="outputDevices"
-          :monitor-device="monitorDevice"
           @update:enabled="handleEnabledChange"
           @update:strength="handleStrengthChange"
           @update:model="handleModelChange"
           @update:preset="handlePresetChange"
           @update:monitor-enabled="handleMonitorChange"
-          @update:monitor-device="handleMonitorDeviceChange"
         />
       </section>
 

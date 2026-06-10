@@ -48,19 +48,19 @@ onUnmounted(() => {
 
 <template>
   <div class="explode-section">
-    <div class="explode-header">
-      <span class="explode-label">{{ t('explode.label') }}</span>
-      <span class="explode-hint">{{ t('explode.hint') }}</span>
-    </div>
-
-    <div class="explode-row">
+    <div class="setting-row">
+      <div class="setting-info">
+        <span class="setting-label">
+          <span class="explode-icon">💥</span>
+          {{ t('explode.start') }}
+        </span>
+      </div>
       <button
-        class="explode-btn"
+        class="toggle"
         :class="{ active: enabled }"
         @click="toggle"
       >
-        <span class="explode-icon">💥</span>
-        <span class="explode-text">{{ enabled ? t('explode.stop') : t('explode.start') }}</span>
+        <span class="toggle-knob"></span>
       </button>
     </div>
 
@@ -96,67 +96,62 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.explode-header {
+.setting-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
-.explode-label {
+.setting-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.setting-label {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-}
-
-.explode-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.explode-row {
   display: flex;
   align-items: center;
-}
-
-.explode-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: 14px 16px;
-  border: 2px solid #ef4444;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #1a1a2e, #16213e);
-  color: #ef4444;
-  font-size: 15px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: all 0.2s;
-  position: relative;
-  overflow: hidden;
-}
-
-.explode-btn:hover {
-  background: linear-gradient(135deg, #1a1a2e, #1e1024);
-  border-color: #f87171;
-  box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
-}
-
-.explode-btn.active {
-  background: linear-gradient(135deg, #7f1d1d, #991b1b);
-  border-color: #fca5a5;
-  color: #fca5a5;
-  animation: shake 0.1s infinite;
-  box-shadow: 0 0 30px rgba(239, 68, 68, 0.5);
+  gap: 6px;
 }
 
 .explode-icon {
-  font-size: 20px;
+  font-size: 16px;
 }
 
-.explode-text {
-  letter-spacing: 1px;
+/* Toggle */
+.toggle {
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  border: none;
+  background: var(--border);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.3s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.toggle.active {
+  background: var(--danger);
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.3s;
+}
+
+.toggle.active .toggle-knob {
+  transform: translateX(20px);
 }
 
 .slider-section {
@@ -226,12 +221,5 @@ onUnmounted(() => {
   justify-content: space-between;
   font-size: 10px;
   color: var(--text-muted);
-}
-
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-3px) rotate(-1deg); }
-  50% { transform: translateX(3px) rotate(1deg); }
-  75% { transform: translateX(-2px) rotate(-0.5deg); }
 }
 </style>

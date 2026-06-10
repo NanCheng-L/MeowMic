@@ -103,8 +103,12 @@ export default {
     autoUpdateDesc: '自动检查并安装新版本',
     save: '保存',
     saving: '保存中...',
+    saveHint: '设备、快捷键等设置需点击保存后生效',
     hotkeyError: '快捷键注册失败，可能与其他快捷键冲突',
     modifierError: '需要至少一个修饰键（Ctrl/Shift/Alt/Win）',
     language: '语言',
+    theme: '主题',
+    themeDark: '深色',
+    themeLight: '浅色',
   },
 }

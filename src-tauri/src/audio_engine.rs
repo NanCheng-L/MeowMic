@@ -65,7 +65,6 @@ pub struct AudioEngine {
     explode_enabled: Arc<AtomicBool>,
     explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
-    monitor_device_name: Arc<RwLock<Option<String>>>,
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     bgm_thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 模型内部状态（归一化统计等），按模型名分别保存
@@ -86,7 +85,6 @@ impl AudioEngine {
             explode_enabled: Arc::new(AtomicBool::new(false)),
             explode_intensity: Arc::new(AtomicU32::new(50)),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
-            monitor_device_name: Arc::new(RwLock::new(None)),
             thread_handle: std::sync::Mutex::new(None),
             bgm_thread_handle: std::sync::Mutex::new(None),
             model_states: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -99,6 +97,7 @@ impl AudioEngine {
         output_device_name: Option<String>,
         model_name: Option<String>,
         resource_dir: Option<std::path::PathBuf>,
+        monitor_enabled_init: bool,
     ) -> Result<(), String> {
         if self.running.load(Ordering::Relaxed) {
             return Err("Engine is already running".to_string());
@@ -117,8 +116,10 @@ impl AudioEngine {
         let explode_enabled = self.explode_enabled.clone();
         let explode_intensity = self.explode_intensity.clone();
         let monitor_enabled = self.monitor_enabled.clone();
-        let monitor_device_name = self.monitor_device_name.clone();
         let model_states = self.model_states.clone();
+
+        // 同步初始监听状态
+        self.monitor_enabled.store(monitor_enabled_init, Ordering::Relaxed);
 
         running.store(true, Ordering::Relaxed);
 
@@ -137,7 +138,6 @@ impl AudioEngine {
                 explode_enabled,
                 explode_intensity,
                 monitor_enabled,
-                monitor_device_name,
                 model_states,
             ) {
                 log::error!("Audio engine error: {}", e);
@@ -238,11 +238,6 @@ impl AudioEngine {
     /// 设置监听模式
     pub fn set_monitor_enabled(&self, enabled: bool) {
         self.monitor_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// 设置监听设备
-    pub fn set_monitor_device(&self, device_name: Option<String>) {
-        *self.monitor_device_name.write() = device_name;
     }
 }
 
@@ -489,7 +484,6 @@ fn audio_loop(
     explode_enabled: Arc<AtomicBool>,
     explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
-    monitor_device_name: Arc<RwLock<Option<String>>>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
@@ -498,6 +492,11 @@ fn audio_loop(
         .map_err(|e| format!("Failed to find input device: {}", e))?;
     let output_device = find_device(output_device_name.as_deref(), false)
         .map_err(|e| format!("Failed to find output device: {}", e))?;
+
+    let input_friendly = input_device.get_friendlyname().unwrap_or_else(|_| "unknown".into());
+    let output_friendly = output_device.get_friendlyname().unwrap_or_else(|_| "unknown".into());
+    log::info!("Input device: '{}' (requested: {:?})", input_friendly, input_device_name);
+    log::info!("Output device: '{}' (requested: {:?})", output_friendly, output_device_name);
 
     // 获取设备原生格式，避免 WASAPI 内部重采样增加延迟
     let fallback_input_format = WaveFormat::new(16, 16, &SampleType::Int, 48000, 1, None);
@@ -546,7 +545,10 @@ fn audio_loop(
     });
     let output_sample_rate = output_format.get_samplespersec();
     let output_channels = output_format.get_nchannels() as usize;
-    log::info!("Output device format: {}Hz, {}ch", output_sample_rate, output_channels);
+    log::info!("Output device format: {}Hz, {}ch, {}bit",
+        output_sample_rate, output_channels,
+        output_format.get_bitspersample()
+    );
 
     let (def_time, _min_time) = output_client
         .get_periods()
@@ -561,6 +563,7 @@ fn audio_loop(
             true,
         )
         .map_err(|e| format!("Failed to initialize output client: {}", e))?;
+    log::info!("Output client initialized on '{}'", output_friendly);
 
     let _output_handle = output_client
         .set_get_eventhandle()
@@ -576,9 +579,7 @@ fn audio_loop(
 
     let frame_size = FRAME_SIZE;
 
-    // ====== 监听客户端：用户选择的设备（耳机/扬声器），用于实时监听降噪效果 ======
-    let monitor_device = monitor_device_name.read().clone();
-    let user_output_name = output_device_name.unwrap_or_default();
+    // ====== 监听客户端：系统默认输出设备（耳机/扬声器），用于实时监听降噪效果 ======
 
     let mut monitor_client_opt: Option<AudioClient> = None;
     let mut monitor_render_opt: Option<AudioRenderClient> = None;
@@ -588,29 +589,26 @@ fn audio_loop(
     let monitor_max_frames = frame_size * (output_sample_rate as usize / 48000 + 1);
     let mut monitor_buffer = vec![0u8; monitor_max_frames * 2 * 2]; // stereo i16
 
-    if let Some(ref m_device_name) = monitor_device {
-        if let Ok(monitor_output) = find_device(Some(m_device_name), false) {
-            let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
-            if monitor_output_name != user_output_name {
-                if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
-                    let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
-                    if m_client.initialize_client(
-                        &monitor_format,
-                        def_time,
-                        &Direction::Render,
-                        &ShareMode::Shared,
-                        true,
-                    ).is_ok()
-                    {
-                        if let Ok(render) = m_client.get_audiorenderclient() {
-                            let evt = m_client.set_get_eventhandle();
-                            if m_client.start_stream().is_ok() {
-                                log::info!("Monitor started: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
-                                monitor_render_opt = Some(render);
-                                monitor_event_opt = evt.ok();
-                                monitor_client_opt = Some(m_client);
-                            }
-                        }
+    // 监听使用系统默认输出设备（和 OBS 一样），不需要用户手动选择
+    if let Ok(monitor_output) = find_device(None, false) {
+        let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
+        if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
+            let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
+            if m_client.initialize_client(
+                &monitor_format,
+                def_time,
+                &Direction::Render,
+                &ShareMode::Shared,
+                true,
+            ).is_ok()
+            {
+                if let Ok(render) = m_client.get_audiorenderclient() {
+                    let evt = m_client.set_get_eventhandle();
+                    if m_client.start_stream().is_ok() {
+                        log::info!("Monitor started on default output: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
+                        monitor_render_opt = Some(render);
+                        monitor_event_opt = evt.ok();
+                        monitor_client_opt = Some(m_client);
                     }
                 }
             }
@@ -652,6 +650,7 @@ fn audio_loop(
 
     // BGM 缓冲：立体声 i16 样本队列
     let mut bgm_buf: Vec<i16> = Vec::new();
+    let mut monitor_was_streaming = monitor_enabled.load(Ordering::Relaxed);
 
     while running.load(Ordering::Relaxed) {
         if input_handle.wait_for_event(100).is_err() {
@@ -748,7 +747,15 @@ fn audio_loop(
                     };
 
                     // ============ 监听输出 ============
-                    if monitor_enabled.load(Ordering::Relaxed) {
+                    let monitor_wants = monitor_enabled.load(Ordering::Relaxed);
+                    if monitor_wants {
+                        // 从关闭切换到开启：重新启动流
+                        if !monitor_was_streaming {
+                            if let Some(ref mut m_client) = monitor_client_opt {
+                                let _ = m_client.start_stream();
+                            }
+                            monitor_was_streaming = true;
+                        }
                         if let Some(ref monitor_render) = monitor_render_opt {
                             let monitor_ready = if let Some(ref evt) = monitor_event_opt {
                                 evt.wait_for_event(10).is_ok()
@@ -778,6 +785,12 @@ fn audio_loop(
                                 );
                             }
                         }
+                    } else if monitor_was_streaming {
+                        // 从开启切换到关闭：停止流 + 写入静音，立即静音
+                        if let Some(ref mut m_client) = monitor_client_opt {
+                            let _ = m_client.stop_stream();
+                        }
+                        monitor_was_streaming = false;
                     }
 
                     // ============ BGM 混音 ============
@@ -889,11 +902,13 @@ fn audio_loop(
                         }
                     }
 
-                    let _ = output_render.write_to_device(
+                    if let Err(e) = output_render.write_to_device(
                         out_frames,
                         &output_buffer[..out_bytes],
                         None,
-                    );
+                    ) {
+                        log::warn!("Output write error: {:?}", e);
+                    }
 
                     frame_count += 1;
 
@@ -911,10 +926,17 @@ fn audio_loop(
                             -100.0
                         };
 
+                        // 延迟测量：输入缓冲 + 输出缓冲的帧数 / 采样率
+                        let input_padding = input_client.get_current_padding().unwrap_or(0);
+                        let output_padding = output_client.get_current_padding().unwrap_or(0);
+                        let input_latency = input_padding as f32 / input_sample_rate as f32 * 1000.0;
+                        let output_latency = output_padding as f32 / output_sample_rate as f32 * 1000.0;
+
                         let mut current_stats = stats.write();
                         current_stats.input_level = input_level_db;
                         current_stats.output_level = output_level_db;
                         current_stats.noise_reduction_db = input_level_db - output_level_db;
+                        current_stats.latency_ms = input_latency + output_latency;
                         current_stats.frames_processed = frame_count;
                         current_stats.spectrum = compute_spectrum(&input_frame, 32);
                     }

@@ -10,8 +10,7 @@ const props = defineProps<{
 }>()
 
 const latencyColor = computed(() => {
-  if (props.latency < 20) return 'var(--accent)'
-  if (props.latency < 50) return 'var(--warning)'
+  if (props.latency < 50) return 'var(--success)'
   return 'var(--danger)'
 })
 </script>

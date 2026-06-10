@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 
 export function useAudioEngine() {
-  const startDenoising = async (inputDevice?: string, outputDevice?: string, model?: string) => {
-    await invoke('start_denoising', { inputDevice, outputDevice, model })
+  const startDenoising = async (inputDevice?: string, outputDevice?: string, model?: string, monitorEnabled?: boolean) => {
+    await invoke('start_denoising', { inputDevice, outputDevice, model, monitorEnabled })
   }
 
   const stopDenoising = async () => {
@@ -33,10 +33,6 @@ export function useAudioEngine() {
     await invoke('set_monitor_mode', { enabled })
   }
 
-  const setMonitorDevice = async (device: string | null) => {
-    await invoke('set_monitor_device', { device })
-  }
-
   return {
     startDenoising,
     stopDenoising,
@@ -46,6 +42,5 @@ export function useAudioEngine() {
     listDenoiseModels,
     installVBCable,
     setMonitorMode,
-    setMonitorDevice,
   }
 }

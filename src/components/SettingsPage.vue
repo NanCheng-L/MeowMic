@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettings } from '../composables/useSettings'
+import { useTheme } from '../composables/useTheme'
 import { availableLocales, setLocale } from '../locales'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 
 const { t } = useI18n()
 const { saveSettings, registerHotkey, unregisterHotkey } = useSettings()
+const { theme, setTheme } = useTheme()
 
 // 暂存的配置
 const localConfig = ref({
@@ -15,7 +17,6 @@ const localConfig = ref({
   selectedOutput: '',
   selectedModel: 'RNNoise',
   monitorEnabled: false,
-  monitorDevice: '',
   hotkey: 'Ctrl+Shift+D',
   hotkeyEnabled: true,
   autostart: false,
@@ -110,7 +111,6 @@ onMounted(async () => {
     localConfig.value.selectedOutput = p.selectedOutput || ''
     localConfig.value.selectedModel = p.selectedModel || 'RNNoise'
     localConfig.value.monitorEnabled = p.monitorEnabled || false
-    localConfig.value.monitorDevice = p.monitorDevice || ''
     localConfig.value.hotkey = p.hotkey || 'Ctrl+Shift+D'
     localConfig.value.hotkeyEnabled = p.hotkeyEnabled ?? true
     localConfig.value.autostart = p.autostart || false
@@ -121,6 +121,10 @@ onMounted(async () => {
     // 同步语言到 i18n（窗口复用时更新界面语言）
     if (p.language) {
       setLocale(p.language)
+    }
+    // 同步主题
+    if (p.theme) {
+      setTheme(p.theme)
     }
   })
 })
@@ -168,13 +172,18 @@ const handleSave = async () => {
     selectedOutput: localConfig.value.selectedOutput,
     selectedModel: localConfig.value.selectedModel,
     monitorEnabled: localConfig.value.monitorEnabled,
-    monitorDevice: localConfig.value.monitorDevice,
     applyAt: Date.now(),
   }))
 
   saving.value = false
   getCurrentWindow().hide()
 }
+
+// 语言即时切换
+watch(() => localConfig.value.language, (lang) => {
+  setLocale(lang)
+  localStorage.setItem('meowmic-lang', lang)
+})
 
 const handleClose = () => {
   getCurrentWindow().hide()
@@ -241,16 +250,6 @@ const handleClose = () => {
             <span class="toggle-knob"></span>
           </button>
         </div>
-        <div v-if="localConfig.monitorEnabled" class="form-group">
-          <label class="form-label">{{ t('device.selectMonitor') }}</label>
-          <div class="select-wrapper">
-            <select v-model="localConfig.monitorDevice">
-              <option value="" disabled>{{ t('device.selectMonitor') }}</option>
-              <option v-for="d in outputDevices" :key="d" :value="d">{{ d }}</option>
-            </select>
-            <span class="select-arrow"></span>
-          </div>
-        </div>
       </section>
 
       <!-- 快捷键 -->
@@ -308,13 +307,39 @@ const handleClose = () => {
           </select>
         </div>
       </section>
+
+      <!-- 主题 -->
+      <section class="section">
+        <h2>{{ t('settings.theme') }}</h2>
+        <div class="theme-options">
+          <button
+            class="theme-card"
+            :class="{ active: theme === 'light' }"
+            @click="setTheme('light')"
+          >
+            <span class="theme-icon">☀️</span>
+            <span class="theme-name">{{ t('settings.themeLight') }}</span>
+          </button>
+          <button
+            class="theme-card"
+            :class="{ active: theme === 'dark' }"
+            @click="setTheme('dark')"
+          >
+            <span class="theme-icon">🌙</span>
+            <span class="theme-name">{{ t('settings.themeDark') }}</span>
+          </button>
+        </div>
+      </section>
     </div>
 
     <div class="settings-footer">
-      <button class="btn btn-secondary" @click="handleClose">{{ t('settings.cancel') }}</button>
-      <button class="btn btn-primary" @click="handleSave" :disabled="saving">
-        {{ saving ? t('settings.saving') : t('settings.save') }}
-      </button>
+      <span class="save-hint">{{ t('settings.saveHint') }}</span>
+      <div class="footer-actions">
+        <button class="btn btn-secondary" @click="handleClose">{{ t('settings.cancel') }}</button>
+        <button class="btn btn-primary" @click="handleSave" :disabled="saving">
+          {{ saving ? t('settings.saving') : t('settings.save') }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -325,7 +350,7 @@ html, body {
   padding: 0;
   overflow: hidden;
   height: 100vh;
-  background: #0a0a0a;
+  background: var(--bg);
   font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 </style>
@@ -333,15 +358,19 @@ html, body {
 <style scoped>
 .settings-page {
   height: 100vh;
-  background: #0a0a0a;
-  color: #e5e5e5;
+  background: var(--bg);
+  color: var(--text-primary);
   display: flex;
   flex-direction: column;
 }
 
 .settings-header {
   padding: 24px 28px 16px;
-  border-bottom: 1px solid #262626;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
 }
 
 .settings-header h1 {
@@ -364,16 +393,16 @@ html, body {
 }
 
 .settings-body::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: var(--bg);
 }
 
 .settings-body::-webkit-scrollbar-thumb {
-  background: #1e1e1e;
+  background: var(--border);
   border-radius: 3px;
 }
 
 .settings-body::-webkit-scrollbar-thumb:hover {
-  background: #666666;
+  background: var(--text-muted);
 }
 
 .section {
@@ -386,11 +415,11 @@ html, body {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
-  color: #a3a3a3;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding-bottom: 8px;
-  border-bottom: 1px solid #262626;
+  border-bottom: 1px solid var(--border);
 }
 
 .form-group {
@@ -401,7 +430,7 @@ html, body {
 
 .form-label {
   font-size: 13px;
-  color: #a3a3a3;
+  color: var(--text-muted);
 }
 
 .select-wrapper {
@@ -411,10 +440,10 @@ html, body {
 .select-wrapper select {
   width: 100%;
   padding: 10px 32px 10px 12px;
-  background: #171717;
-  border: 1px solid #262626;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #e5e5e5;
+  color: var(--text-primary);
   font-size: 13px;
   appearance: none;
   cursor: pointer;
@@ -422,12 +451,12 @@ html, body {
 }
 
 .select-wrapper select:hover {
-  border-color: #404040;
+  border-color: var(--text-muted);
 }
 
 .select-wrapper select:focus {
   outline: none;
-  border-color: #10b981;
+  border-color: var(--accent);
 }
 
 .select-arrow {
@@ -439,7 +468,7 @@ html, body {
   height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
-  border-top: 5px solid #737373;
+  border-top: 5px solid var(--text-muted);
   pointer-events: none;
 }
 
@@ -451,7 +480,7 @@ html, body {
 
 .setting-label {
   font-size: 14px;
-  color: #e5e5e5;
+  color: var(--text-primary);
 }
 
 /* Toggle */
@@ -460,7 +489,7 @@ html, body {
   height: 24px;
   border-radius: 12px;
   border: none;
-  background: #404040;
+  background: var(--border);
   cursor: pointer;
   position: relative;
   transition: background 0.3s;
@@ -469,7 +498,7 @@ html, body {
 }
 
 .toggle.active {
-  background: #10b981;
+  background: var(--accent);
 }
 
 .toggle-knob {
@@ -496,8 +525,8 @@ html, body {
 
 .hotkey-display {
   flex: 1;
-  background: #171717;
-  border: 1px solid #262626;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 12px;
   text-align: center;
@@ -507,13 +536,13 @@ html, body {
   font-family: 'DM Mono', monospace;
   font-size: 14px;
   font-weight: 500;
-  color: #e5e5e5;
+  color: var(--text-primary);
   letter-spacing: 0.5px;
 }
 
 .hotkey-recording {
   font-size: 13px;
-  color: #10b981;
+  color: var(--accent);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
@@ -523,31 +552,31 @@ html, body {
 }
 
 .record-btn {
-  background: #171717;
-  border: 1px solid #262626;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 16px;
   font-size: 13px;
   font-weight: 500;
-  color: #e5e5e5;
+  color: var(--text-primary);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .record-btn:hover {
-  border-color: #10b981;
-  color: #10b981;
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .record-btn.recording {
-  background: #ef4444;
-  border-color: #ef4444;
+  background: var(--danger);
+  border-color: var(--danger);
   color: white;
 }
 
 .hotkey-error {
   font-size: 12px;
-  color: #ef4444;
+  color: var(--danger);
   margin: 0;
 }
 
@@ -555,10 +584,10 @@ html, body {
 .language-select {
   width: 100%;
   padding: 10px 12px;
-  background: #171717;
-  border: 1px solid #262626;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #e5e5e5;
+  color: var(--text-primary);
   font-size: 13px;
   appearance: none;
   cursor: pointer;
@@ -566,16 +595,26 @@ html, body {
 
 .language-select:focus {
   outline: none;
-  border-color: #10b981;
+  border-color: var(--accent);
 }
 
 /* Footer */
 .settings-footer {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
   padding: 16px 28px;
-  border-top: 1px solid #262626;
+  border-top: 1px solid var(--border);
+}
+
+.save-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.footer-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .btn {
@@ -589,17 +628,17 @@ html, body {
 }
 
 .btn-secondary {
-  background: #171717;
-  color: #e5e5e5;
-  border: 1px solid #262626;
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
 }
 
 .btn-secondary:hover {
-  border-color: #404040;
+  border-color: var(--text-muted);
 }
 
 .btn-primary {
-  background: #10b981;
+  background: var(--accent);
   color: white;
 }
 
@@ -610,5 +649,44 @@ html, body {
 .btn-primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Theme selector */
+.theme-options {
+  display: flex;
+  gap: 8px;
+}
+
+.theme-card {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.theme-card:hover {
+  border-color: var(--text-muted);
+}
+
+.theme-card.active {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+.theme-icon {
+  font-size: 16px;
+}
+
+.theme-name {
+  font-weight: 500;
 }
 </style>
