@@ -45,7 +45,7 @@ src-tauri/src/          # Rust 后端
 - **设备枚举**：用 `DeviceCollection::new(&Direction)` + `get_device_at_index(i)`，没有 `.iter()` 方法
 - **WASAPI Direction**：`Direction::Capture` = 录音设备（麦克风），`Direction::Render` = 播放设备（扬声器/VB-Cable）。`initialize_client` 的 direction 参数要和设备方向一致
 - **Windows PATH**：pnpm 通过 npm 全局安装后，bash 环境需通过 `node.exe pnpm.mjs` 调用，或在 PowerShell 中设置 PATH
-- **Tauri autostart 插件**：API 方法名是 `autolaunch()` 不是 `autostart()`（v3 会改名），`ManagerExt` trait 必须 `use` 到作用域
+- **Tauri autostart 插件**：API 方法名是 `autolaunch()` 不是 `autostart()`（v3 会改名），`ManagerExt` trait 必须 `use` 到作用域；必须在 `capabilities/default.json` 声明 `autostart:allow-is-enabled`、`autostart:allow-enable`、`autostart:allow-disable`，否则权限不足
 - **Tauri global-shortcut 插件**：没有 `init()` 函数，用 `Builder::new().build()`；权限名用连字符 `allow-is-registered` 不是下划线
 - **WASAPI Process Loopback**：`new_application_loopback_client(pid, true)` 的 `get_mixformat()` 和 `get_periods()` 返回 `E_NOTIMPL`，必须用固定格式 `WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None)` + `initialize_client` period 传 0
 - **Windows ToolHelp API**：枚举进程用 `CreateToolhelp32Snapshot` + `Process32FirstW/NextW`，需要 `Win32_System_Diagnostics_ToolHelp` feature
@@ -66,6 +66,7 @@ src-tauri/src/          # Rust 后端
 - **WASAPI 共享模式默认端点**：共享模式下音频流绑定系统默认端点，拔耳机/切换默认设备会中断流。设备热拔插触发重启可恢复，但有短暂间隙
 - **Tauri WebviewWindow**：构造函数 `new WebviewWindow(label, opts)` 没有 `.on()` 方法，用 `.listen()` 或 `.once()`；创建独立窗口需要在 `capabilities/default.json` 添加窗口名到 `windows` 数组并声明 `core:webview:allow-create-webview-window` 权限；窗口关闭用 `hide()` 代替 `close()` 避免 label 无法释放导致再次创建失败
 - **Tauri 图标更新不生效**：替换 `icons/` 目录下的图标文件后，`pnpm tauri dev` 可能仍显示旧图标。需要清除 cargo 编译缓存（`cargo clean` 或删除 `src-tauri/target/`）再重新编译，图标才会更新。单纯重启 dev 服务不够
+- **NSIS 安装器图标缓存**：Windows 对 exe 文件名缓存图标，替换 icon.ico 后重新打包，安装包图标可能仍显示旧图标。解决：改版本号（`tauri.conf.json` 的 `version`）让输出文件名变化，或手动清除 `%LocalAppData%\Microsoft\Windows\Explorer\iconcache*` 并重启资源管理器
 - **多窗口 CSS 变量**：Tauri 每个窗口是独立 webview，各有自己的 JS 上下文。每个窗口的入口文件（`settings-main.ts`、`tutorial-main.ts`）必须导入 `main.css`，否则 CSS 变量不生效；需要调用 `useTheme()` 才会读取/应用主题
 - **多窗口状态同步**：`localStorage` 的 `storage` 事件不会在同一文档中触发，只能跨窗口。同一窗口内的状态变更通过 Vue 响应式 ref 共享；跨窗口通过 Tauri 事件（`emit`/`listen`）或 `setInterval` 轮询 localStorage
 - **WASAPI 监听停止**：关闭监听时仅跳过写入不够，WASAPI 缓冲区残余音频会继续播放。必须调用 `stop_stream()` 立即停止，并用 `monitor_was_streaming` 标记避免每帧重复 stop/start
