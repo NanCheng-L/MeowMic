@@ -340,6 +340,10 @@ watch([denoiseEnabled, denoiseStrength], () => {
 onMounted(async () => {
   loadConfig()
   await loadDevices()
+  // WASAPI 首次初始化后设备列表可能不完整，延迟再刷新一次
+  setTimeout(async () => {
+    await loadDevices()
+  }, 500)
   await loadSettings()
   try {
     availableModels.value = await listDenoiseModels()
