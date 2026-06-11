@@ -14,6 +14,7 @@ export default {
     installDenied: '安装被拒绝，请在弹出的窗口中点击「是」',
     installFailed: '安装失败，请从官网手动下载',
     selectMonitor: '选择监听设备',
+    sameDeviceWarning: '输入输出为同一设备会导致无法正常工作，请选择不同的输出设备',
   },
   denoise: {
     label: '降噪',

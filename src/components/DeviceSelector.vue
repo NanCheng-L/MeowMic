@@ -28,6 +28,20 @@ const hasVirtualCable = computed(() => {
   )
 })
 
+// 检测输入输出是否是同一物理设备（同一 USB 设备会导致 WASAPI 读取失败）
+const sameDeviceWarning = computed(() => {
+  if (!props.inputValue || !props.outputValue) return false
+  // 提取括号里的型号名，如 "麦克风 (K7)" -> "k7"
+  const extractModel = (name: string) => {
+    const match = name.match(/\((.+?)\)/)
+    return match ? match[1].trim().toLowerCase() : ''
+  }
+  const inputModel = extractModel(props.inputValue)
+  const outputModel = extractModel(props.outputValue)
+  // 型号相同且不为空，且不是 VB-Cable
+  return inputModel && inputModel === outputModel && !inputModel.includes('cable')
+})
+
 const installing = ref(false)
 const installError = ref('')
 
@@ -102,6 +116,10 @@ const openVBCableWebsite = async () => {
 
     <p v-if="inputDevices.length === 0 && !disabled" class="empty-hint">
       {{ t('device.noInput') }}
+    </p>
+
+    <p v-if="sameDeviceWarning" class="same-device-warning">
+      {{ t('device.sameDeviceWarning') }}
     </p>
 
     <div v-if="!hasVirtualCable && outputDevices.length > 0 && !disabled" class="vb-warning">
@@ -246,6 +264,16 @@ select:disabled {
   color: #ef4444;
   font-size: 11px;
   width: 100%;
+}
+
+.same-device-warning {
+  font-size: 12px;
+  color: #f59e0b;
+  margin: 0;
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
 }
 
 .vb-actions {

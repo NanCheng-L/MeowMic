@@ -14,6 +14,7 @@ export default {
     installDenied: 'Installation denied — please click "Yes" in the UAC prompt',
     installFailed: 'Installation failed — please download from the website',
     selectMonitor: 'Select monitor device',
+    sameDeviceWarning: 'Input and output on the same device will not work. Please select a different output device',
   },
   denoise: {
     label: 'Denoise',

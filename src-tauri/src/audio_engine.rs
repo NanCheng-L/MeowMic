@@ -7,6 +7,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use wasapi::*;
 
+/// 写入调试日志到文件（打包后可用）
+fn debug_log(msg: &str) {
+    use std::io::Write;
+    let log_path = std::env::temp_dir().join("meowmic-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let elapsed = std::time::Instant::now().elapsed();
+        let _ = writeln!(f, "[{:?}] {}", elapsed, msg);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenoiseConfig {
     pub enabled: bool,
@@ -487,6 +497,7 @@ fn audio_loop(
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
+    debug_log("=== audio_loop started ===");
 
     let input_device = find_device(input_device_name.as_deref(), true)
         .map_err(|e| format!("Failed to find input device: {}", e))?;
@@ -495,6 +506,8 @@ fn audio_loop(
 
     let input_friendly = input_device.get_friendlyname().unwrap_or_else(|_| "unknown".into());
     let output_friendly = output_device.get_friendlyname().unwrap_or_else(|_| "unknown".into());
+    debug_log(&format!("Input device: '{}'", input_friendly));
+    debug_log(&format!("Output device: '{}'", output_friendly));
     log::info!("Input device: '{}' (requested: {:?})", input_friendly, input_device_name);
     log::info!("Output device: '{}' (requested: {:?})", output_friendly, output_device_name);
 
@@ -637,10 +650,62 @@ fn audio_loop(
     output_client
         .start_stream()
         .map_err(|e| format!("Failed to start output: {}", e))?;
+
     let mut first_frame = true;
     // 输入缓冲区：按设备实际 bytes_per_frame 分配
     let input_bytes_per_frame = input_format.get_blockalign() as usize;
     let output_bytes_per_frame = output_format.get_blockalign() as usize;
+
+    // ====== WASAPI 流启动预热：等待设备真正就绪 ======
+    // 首次启动时 WASAPI 设备需要时间初始化，可能读到空数据
+    // 如果预热超时，重启流重试
+    debug_log("Starting warmup...");
+    let warmup_buf_size = frame_size * input_bytes_per_frame;
+    let mut warmup_buf = vec![0u8; warmup_buf_size];
+    let max_retries = 3;
+    let mut warmup_ok = false;
+
+    for attempt in 0..max_retries {
+        debug_log(&format!("Warmup attempt {}/{}", attempt + 1, max_retries));
+        let warmup_start = std::time::Instant::now();
+        let mut warmup_frames = 0;
+        let mut got_signal = false;
+
+        while warmup_start.elapsed().as_millis() < 300 {
+            if input_handle.wait_for_event(50).is_ok() {
+                if let Ok((frames_read, _)) = input_capture.read_from_device(&mut warmup_buf) {
+                    if frames_read > 0 {
+                        warmup_frames += 1;
+                        let bytes_read = frames_read as usize * input_bytes_per_frame;
+                        if warmup_buf[..bytes_read].iter().any(|&b| b != 0) {
+                            got_signal = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if got_signal {
+            debug_log(&format!("Warmup OK: {} frames, {}ms", warmup_frames, warmup_start.elapsed().as_millis()));
+            warmup_ok = true;
+            break;
+        }
+
+        debug_log(&format!("Warmup attempt {} failed, restarting streams...", attempt + 1));
+        // 重启流
+        let _ = input_client.stop_stream();
+        let _ = output_client.stop_stream();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = input_client.start_stream();
+        let _ = output_client.start_stream();
+    }
+
+    if !warmup_ok {
+        debug_log("All warmup attempts failed!");
+    }
+    debug_log("Entering main audio loop");
+
     let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];
     let mut output_buffer = vec![0u8; frame_size * output_bytes_per_frame];
     let mut frame_count: u64 = 0;
@@ -652,18 +717,38 @@ fn audio_loop(
     let mut bgm_buf: Vec<i16> = Vec::new();
     let mut monitor_was_streaming = monitor_enabled.load(Ordering::Relaxed);
 
+    let mut loop_iteration: u64 = 0;
+    let mut consecutive_zero_reads: u32 = 0;
     while running.load(Ordering::Relaxed) {
         if input_handle.wait_for_event(100).is_err() {
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         }
 
+        loop_iteration += 1;
         let current_config = config.read().clone();
 
         match input_capture.read_from_device(&mut input_buffer) {
             Ok((frames_read, _flags)) => {
                 if frames_read == 0 {
+                    consecutive_zero_reads += 1;
+                    if consecutive_zero_reads >= 100 {
+                        // 连续 100 次读取失败，可能是同一 USB 设备导致的死锁
+                        debug_log(&format!("FATAL: {} consecutive zero reads, likely same-device conflict", consecutive_zero_reads));
+                        return Err("AUDIO_DEVICE_CONFLICT: 输入输出可能是同一设备，请更换输出设备".to_string());
+                    }
+                    if loop_iteration <= 20 {
+                        debug_log(&format!("Loop iter {}: frames_read=0", loop_iteration));
+                    }
                     continue;
+                }
+                consecutive_zero_reads = 0; // 重置计数器
+
+                // 前几次迭代记录详细信息
+                if loop_iteration <= 5 {
+                    let bytes_read_dbg = frames_read as usize * input_bytes_per_frame;
+                    let has_signal = input_buffer[..bytes_read_dbg].iter().any(|&b| b != 0);
+                    debug_log(&format!("Loop iter {}: frames_read={}, has_signal={}", loop_iteration, frames_read, has_signal));
                 }
 
                 // 1. 原始字节 → f32 样本（根据设备实际格式）
@@ -902,12 +987,18 @@ fn audio_loop(
                         }
                     }
 
-                    if let Err(e) = output_render.write_to_device(
-                        out_frames,
-                        &output_buffer[..out_bytes],
-                        None,
-                    ) {
-                        log::warn!("Output write error: {:?}", e);
+                    // 检查输出缓冲区是否有空间，避免阻塞（同一 USB 设备时钟同步会死锁）
+                    // 共享模式下缓冲区通常是 10ms，留 2 帧余量
+                    let output_padding = output_client.get_current_padding().unwrap_or(0);
+                    let max_padding = (output_sample_rate / 100) * 2; // 20ms 余量
+                    if output_padding < max_padding {
+                        if let Err(e) = output_render.write_to_device(
+                            out_frames,
+                            &output_buffer[..out_bytes],
+                            None,
+                        ) {
+                            log::warn!("Output write error: {:?}", e);
+                        }
                     }
 
                     frame_count += 1;

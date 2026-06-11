@@ -28,8 +28,8 @@ const outputDevices = ref<string[]>([])
 const selectedInput = ref('')
 const selectedOutput = ref('')
 const isRunning = ref(false)
-const denoiseEnabled = ref(true)
-const denoiseStrength = ref(0.8)
+const denoiseEnabled = ref(false)
+const denoiseStrength = ref(0.5)
 const isLoading = ref(false)
 
 const openTutorial = async () => {
@@ -209,6 +209,8 @@ const handleStart = async () => {
       monitorEnabled.value
     )
     isRunning.value = true
+    // 启动后同步降噪开关状态到后端
+    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value })
     startPolling()
   } catch (e) {
     const msg = String(e)
@@ -216,7 +218,20 @@ const handleStart = async () => {
     if (msg.includes('already running')) {
       console.warn('Engine already running, syncing state')
       isRunning.value = true
+      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value })
       startPolling()
+    } else if (msg.includes('AUDIO_DEVICE_CONFLICT')) {
+      // 输入输出是同一设备导致的死锁
+      console.error('Device conflict: input and output are the same device')
+      isRunning.value = false
+      // 自动切换到系统默认输出
+      if (outputDevices.value.length > 0) {
+        const altOutput = outputDevices.value.find(d => d !== selectedInput.value) || outputDevices.value[0]
+        selectedOutput.value = altOutput
+        saveConfig()
+        // 重新尝试启动
+        setTimeout(() => handleStart(), 500)
+      }
     } else {
       console.error('Failed to start denoising:', e)
     }
@@ -260,7 +275,13 @@ const scheduleRestart = (delay = 500) => {
 
 const handleEnabledChange = async (enabled: boolean) => {
   denoiseEnabled.value = enabled
-  await updateConfig({ enabled })
+  // 只更新降噪开关状态，引擎继续运行（用户需要监听麦克风）
+  if (isRunning.value) {
+    await updateConfig({ enabled })
+  } else if (enabled) {
+    // 引擎未运行时开启降噪，启动引擎
+    await handleStart()
+  }
   saveConfig()
 }
 
@@ -337,13 +358,16 @@ watch([denoiseEnabled, denoiseStrength], () => {
   saveConfig()
 })
 
+// 用户通过下拉列表切换设备时，重启引擎
+watch([selectedInput, selectedOutput], () => {
+  if (initialized && isRunning.value) {
+    scheduleRestart(100)
+  }
+})
+
 onMounted(async () => {
   loadConfig()
   await loadDevices()
-  // WASAPI 首次初始化后设备列表可能不完整，延迟再刷新一次
-  setTimeout(async () => {
-    await loadDevices()
-  }, 500)
   await loadSettings()
   try {
     availableModels.value = await listDenoiseModels()
@@ -352,6 +376,7 @@ onMounted(async () => {
   }
   // 先尝试停掉残留引擎（HMR 热重载时旧实例未清理）
   try { await stopDenoising() } catch {}
+  // 引擎始终启动，降噪开关只控制降噪处理（用户需要监听麦克风）
   await handleStart()
   initialized = true
 
