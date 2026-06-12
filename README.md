@@ -3,6 +3,9 @@
 > 🐱🎤 实时麦克风降噪桌面应用，为直播和游戏场景打造。
 
 基于 WASAPI 实时音频处理，支持 RNNoise 降噪模型，开箱即用。
+<img width="526" height="890" alt="d63096ca-beae-4286-ab34-781599ef8131" src="https://github.com/user-attachments/assets/01a89f2d-ad96-4e58-8675-bcf860c727de" />
+<img width="526" height="890" alt="41e71233-b375-4440-ae58-29a64a9b0c6d" src="https://github.com/user-attachments/assets/4a282f7c-2960-4c34-beac-a7435b7262b8" />
+
 
 ## 功能
 
