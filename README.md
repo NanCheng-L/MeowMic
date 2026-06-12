@@ -24,6 +24,7 @@
 - VB-Audio Virtual Cable 虚拟设备引导
 - 多语言支持（中文 / English）
 - 主题切换（深色 / 浅色，默认浅色暖色调）
+- 自动更新（检测新版本 → 下载 → 静默安装）
 
 ## 为什么选 MeowMic
 
@@ -112,6 +113,7 @@ src-tauri/src/          # Rust 后端
 - tauri-plugin-global-shortcut - 全局快捷键
 - tauri-plugin-store - 配置持久化
 - tauri-plugin-autostart - 开机自启动
+- tauri-plugin-updater - 自动更新（GitHub Releases）
 
 ## 免责声明
 

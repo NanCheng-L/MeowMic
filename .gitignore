@@ -18,6 +18,7 @@ src-tauri/WixTools/
 src-tauri/Frameworks/
 *.msi
 *.exe
+tauri.key
 
 # Editor directories and files
 .vscode/*

@@ -16,6 +16,8 @@ Phase 0-11 + 设备热拔插 + i18n 已完成（2026-06-06）：
 - ✅ 频谱频率坐标标注
 - ✅ 设备热拔插检测（后台轮询 + Tauri 事件通知）
 - ✅ 多语言支持（vue-i18n，中文 / 英文）
+- ✅ 主题切换（深色/浅色，默认浅色暖色调）— 2026-06-10
+- ✅ 自动更新（tauri-plugin-updater + GitHub Releases）— 2026-06-12
 
 ## 迭代计划
 
@@ -116,8 +118,8 @@ Offload Pin → Topology → Line Out（实际音频输出）
 #### 其他商业化基础设施
 
 - [ ] 微软 Partner Center 注册（免费，用于驱动证明签名）
-- [ ] NSIS/Inno Setup 安装包
-- [ ] 自动更新（tauri-plugin-updater）
+- [x] NSIS 安装包（中英双语 + autostart 权限声明 + 图标配置）
+- [x] 自动更新（tauri-plugin-updater + GitHub Releases）— 2026-06-12
 - [ ] 许可证/激活机制
 
 ## 降噪模型架构

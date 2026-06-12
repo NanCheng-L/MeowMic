@@ -365,6 +365,7 @@ pub fn run() {
             Some(vec!["--hidden"]),
         ))
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineState { engine })
         .invoke_handler(tauri::generate_handler![
             start_denoising,

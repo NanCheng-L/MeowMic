@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettings } from '../composables/useSettings'
 import { useTheme } from '../composables/useTheme'
 import { availableLocales, setLocale } from '../locales'
+import UpdateChecker from './UpdateChecker.vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 
@@ -330,6 +331,9 @@ const handleClose = () => {
           </button>
         </div>
       </section>
+
+      <!-- 检查更新 -->
+      <UpdateChecker />
     </div>
 
     <div class="settings-footer">

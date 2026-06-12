@@ -15,6 +15,7 @@ import StatusBadge from './components/StatusBadge.vue'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import BgmMixer from './components/BgmMixer.vue'
 import ExplodeButton from './components/ExplodeButton.vue'
+import { check } from '@tauri-apps/plugin-updater'
 
 const { t } = useI18n()
 
@@ -117,6 +118,7 @@ const selectedPreset = ref('standard')
 const monitorEnabled = ref(false)
 const explodeIntensity = ref(0.75)
 const explodeEnabled = ref(false)
+const hasUpdate = ref(false)
 
 let unlistenToggle: (() => void) | null = null
 let unlistenDevices: (() => void) | null = null
@@ -380,6 +382,14 @@ onMounted(async () => {
   await handleStart()
   initialized = true
 
+  // 启动 3 秒后静默检查更新
+  setTimeout(async () => {
+    try {
+      const update = await check()
+      if (update) hasUpdate.value = true
+    } catch {}
+  }, 3000)
+
   // 监听 Rust 端全局快捷键事件
   unlistenToggle = await listen('toggle-denoise', () => {
     toggleDenoise()
@@ -470,6 +480,7 @@ onUnmounted(() => {
           </svg>
         </button>
         <button class="settings-btn" @click="openSettings" :title="t('settings.title')">
+          <span v-if="hasUpdate" class="update-badge"></span>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -597,6 +608,18 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   overflow: visible;
+  position: relative;
+}
+
+.update-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg);
 }
 
 .settings-btn:hover {
