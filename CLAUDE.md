@@ -38,7 +38,7 @@ src-tauri/src/          # Rust 后端
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
   lib.rs                # Tauri 命令注册 + 系统托盘 + 设置管理
 scripts/                # 构建/发布辅助脚本
-  generate-update-json.js  # 生成更新所需的 latest.json
+  generate-update-json.cjs # 生成更新所需的 latest.json（输出到安装包同目录，自动读取 .sig）
   set-signing-env.ps1      # 设置签名环境变量（构建前运行）
 ```
 
@@ -95,11 +95,9 @@ scripts/                # 构建/发布辅助脚本
 
 1. 更新三处版本号
 2. 在 PowerShell 中设置签名环境变量：`. .\scripts\set-signing-env.ps1`
-3. `pnpm tauri build` 构建（会自动签名，生成 `.nsis` 安装包 + `.nsis.zip.sig` 签名文件）
-4. 用私钥签名安装包：`pnpm tauri signer sign <安装包路径>`
-5. 运行 `node scripts/generate-update-json.js <版本号> <安装包路径>` 生成 `latest.json`
-6. 将签名填入 `latest.json` 的 `signature` 字段
-7. 在 GitHub 创建 Release `v<版本号>`，上传安装包 + `latest.json`
+3. `pnpm tauri build` 构建（会自动签名，生成安装包 + `.sig` 签名文件）
+4. 运行 `node scripts/generate-update-json.cjs <版本号> <安装包路径>` 生成 `latest.json`（自动读取 `.sig`，输出到安装包同目录）
+5. 在 GitHub 创建 Release `v<版本号>`，上传安装包 + `latest.json`
 
 ### 密钥生成
 
