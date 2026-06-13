@@ -340,7 +340,19 @@ fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
                                         if let Ok(pid) = simple.GetProcessId() {
                                             let pid = pid as u32;
                                             if pid > 0 && pid != my_pid {
-                                                active_pids.push(pid);
+                                                let state = control.GetState().unwrap_or(AudioSessionState(0));
+                                                // 活跃会话直接加入；非活跃会话只加入已知播放器
+                                                if state == AudioSessionState(1) {
+                                                    active_pids.push(pid);
+                                                } else {
+                                                    // 检查 exe 名是否匹配已知播放器
+                                                    let exe = pid_to_exe.get(&pid).cloned().unwrap_or_default();
+                                                    let exe_lower = exe.to_lowercase();
+                                                    let is_known_player = APP_NAME_MAP.iter().any(|(key, _)| exe_lower.contains(*key));
+                                                    if is_known_player {
+                                                        active_pids.push(pid);
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -356,6 +368,7 @@ fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
     // 第三步：合并结果
     let mut processes = Vec::new();
     let mut seen_pids: HashSet<u32> = HashSet::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
     for pid in active_pids {
         if seen_pids.contains(&pid) {
             continue;
@@ -386,6 +399,13 @@ fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
                 pid_to_path.get(&pid).and_then(|path| get_product_name_from_path(path))
             })
             .unwrap_or_else(|| exe.strip_suffix(".exe").unwrap_or(&exe).to_string());
+
+        // 过滤空名称和重复名称
+        if friendly.is_empty() || seen_names.contains(&friendly) {
+            continue;
+        }
+        seen_names.insert(friendly.clone());
+
         processes.push((friendly, exe, pid));
     }
 
@@ -406,6 +426,7 @@ const APP_NAME_MAP: &[(&str, &str)] = &[
     ("potplayer", "PotPlayer"),
     ("spotify", "Spotify"),
     ("douyin", "抖音"),
+    ("weixin", "微信"),
     ("wechat", "微信"),
     ("obs64", "OBS Studio"),
     ("obs32", "OBS Studio"),
