@@ -31,6 +31,7 @@ const selectedOutput = ref('')
 const isRunning = ref(false)
 const denoiseEnabled = ref(false)
 const denoiseStrength = ref(0.5)
+const micGain = ref(1.0)
 const isLoading = ref(false)
 
 const openTutorial = async () => {
@@ -125,16 +126,21 @@ let unlistenDevices: (() => void) | null = null
 let initialized = false
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let restarting = false
+let lastUserInput = '' // 记住用户最后选择的输入设备
 
 const loadConfig = () => {
   try {
     const saved = localStorage.getItem('meowmic-config')
     if (saved) {
       const config = JSON.parse(saved)
-      if (config.selectedInput) selectedInput.value = config.selectedInput
+      if (config.selectedInput) {
+        selectedInput.value = config.selectedInput
+        lastUserInput = config.selectedInput
+      }
       if (config.selectedOutput) selectedOutput.value = config.selectedOutput
       if (config.denoiseEnabled !== undefined) denoiseEnabled.value = config.denoiseEnabled
       if (config.denoiseStrength !== undefined) denoiseStrength.value = config.denoiseStrength
+      if (config.micGain !== undefined) micGain.value = config.micGain
       if (config.selectedModel) selectedModel.value = config.selectedModel
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
@@ -152,6 +158,7 @@ const saveConfig = () => {
       selectedOutput: selectedOutput.value,
       denoiseEnabled: denoiseEnabled.value,
       denoiseStrength: denoiseStrength.value,
+      micGain: micGain.value,
       selectedModel: selectedModel.value,
       selectedPreset: selectedPreset.value,
       monitorEnabled: monitorEnabled.value,
@@ -212,7 +219,7 @@ const handleStart = async () => {
     )
     isRunning.value = true
     // 启动后同步降噪开关状态到后端
-    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value })
+    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
     startPolling()
   } catch (e) {
     const msg = String(e)
@@ -220,7 +227,7 @@ const handleStart = async () => {
     if (msg.includes('already running')) {
       console.warn('Engine already running, syncing state')
       isRunning.value = true
-      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value })
+      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
       startPolling()
     } else if (msg.includes('AUDIO_DEVICE_CONFLICT')) {
       // 输入输出是同一设备导致的死锁
@@ -290,6 +297,12 @@ const handleEnabledChange = async (enabled: boolean) => {
 const handleStrengthChange = async (strength: number) => {
   denoiseStrength.value = strength
   await updateConfig({ strength })
+  saveConfig()
+}
+
+const handleMicGainChange = async (gain: number) => {
+  micGain.value = gain
+  await updateConfig({ micGain: gain })
   saveConfig()
 }
 
@@ -403,16 +416,17 @@ onMounted(async () => {
     // 初始化期间跳过，避免干扰启动流程
     if (!initialized) return
 
-    // 更新设备列表
     const prevInput = selectedInput.value
-    const prevOutput = selectedOutput.value
 
     inputDevices.value = event.payload.input_devices
     outputDevices.value = event.payload.output_devices
 
-    // 如果之前选中的设备还在列表中，保持选中；否则选第一个
+    // 优先恢复用户之前选的设备，其次保持当前设备
     if (inputDevices.value.length > 0) {
-      if (!inputDevices.value.includes(prevInput)) {
+      if (lastUserInput && inputDevices.value.includes(lastUserInput)) {
+        selectedInput.value = lastUserInput
+      } else if (inputDevices.value.includes(prevInput)) {
+      } else {
         selectedInput.value = inputDevices.value[0]
       }
     } else {
@@ -420,7 +434,7 @@ onMounted(async () => {
     }
 
     if (outputDevices.value.length > 0) {
-      if (!outputDevices.value.includes(prevOutput)) {
+      if (!outputDevices.value.includes(selectedOutput.value)) {
         selectedOutput.value = outputDevices.value[0]
       }
     } else {
@@ -499,6 +513,7 @@ onUnmounted(() => {
           v-model:output-value="selectedOutput"
           @refresh="handleRefresh"
           @install-success="postInstall = true"
+          @update:input-value="(v: string) => { lastUserInput = v }"
         />
       </section>
 
@@ -511,11 +526,13 @@ onUnmounted(() => {
           :preset="selectedPreset"
           :loading="isLoading"
           :monitor-enabled="monitorEnabled"
+          :mic-gain="micGain"
           @update:enabled="handleEnabledChange"
           @update:strength="handleStrengthChange"
           @update:model="handleModelChange"
           @update:preset="handlePresetChange"
           @update:monitor-enabled="handleMonitorChange"
+          @update:mic-gain="handleMicGainChange"
         />
       </section>
 

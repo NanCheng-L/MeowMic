@@ -78,6 +78,13 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI 同设备冲突**：同一 USB 设备的输入输出端点（如 K7 麦克风 + K7 耳机）同时打开会导致 `read_from_device` 持续返回 0 帧。原因：共享模式下同一物理设备的 Capture/Render 端点共享时钟，缓冲区竞争死锁。解决：检测连续 100 次 0 帧读取后返回 `AUDIO_DEVICE_CONFLICT` 错误，前端自动切换输出设备
 - **WASAPI 首次启动预热**：打包后首次启动，WASAPI 设备可能需要几帧才能进入稳定状态，前几帧可能是空数据。解决：启动后预热最多 3 次（每次 300ms），检测到非零信号才进入主循环；预热失败则重启流重试
 - **打包调试日志**：`env_logger::init()` 在打包后无输出。用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，格式 `[elapsed] message`
+- **增益控制位置**：`mic_gain` 必须在降噪**之后**应用（`audio_loop` 中 denoise 输出 → strength mixing → mic_gain），放在降噪前会放大噪音导致降噪效果变差
+- **update_denoise_config 竞争**：每次调用都创建 `DenoiseConfig::default()` 会重置 strength 为 0.5。必须先 `get_config()` 读当前值再只更新传入的字段
+- **Windows 版本信息读取**：`windows` crate 0.58 没有 `Win32_System_Diagnostics_Process` feature，`GetFileVersionInfoW`/`VerQueryValueW` 需用 raw FFI（`extern "system"` 声明）
+- **进程名获取不可靠**：FileDescription 对国产软件（网易云、抖音、QQ浏览器）通常返回英文或截断值，必须用 exe 名映射表兜底；窗口标题包含动态内容（歌名、场景名），需清理 " - " 后缀和版本号
+- **BGM 多选进程**：每个 PID 启动独立 WASAPI loopback 线程，通过同一 channel 发送混音数据，用 manager 线程 join 所有子线程
+- **设备热拔插恢复**：`lastUserInput` 只在用户手动选设备和启动加载时更新，`devices-changed` 处理器绝不能覆盖；Vue watch 异步执行，不能用同步标志位区分用户/系统变更
+- **WASAPI IAudioSessionManager2**：枚举音频会话需要 `Win32_System_Com` + `Win32_Media_Audio` feature；`GetSessionEnumerator` 返回所有会话（含暂停），不过滤 `AudioSessionState_Active` 以保留暂停的进程
 
 ## 版本号管理
 

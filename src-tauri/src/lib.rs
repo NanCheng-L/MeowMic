@@ -2,7 +2,7 @@ mod audio_engine;
 mod denoise;
 mod device_watcher;
 
-use audio_engine::{AudioEngine, DenoiseConfig, AudioStats};
+use audio_engine::{AudioEngine, AudioStats};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -116,14 +116,19 @@ fn update_denoise_config(
     state: State<'_, EngineState>,
     enabled: Option<bool>,
     strength: Option<f32>,
+    mic_gain: Option<f32>,
 ) -> Result<(), String> {
     let engine = state.engine.lock();
-    let mut config = DenoiseConfig::default();
+    // 读取当前配置，只更新传入的字段
+    let mut config = engine.get_config();
     if let Some(e) = enabled {
         config.enabled = e;
     }
     if let Some(s) = strength {
         config.strength = s.clamp(0.0, 1.0);
+    }
+    if let Some(g) = mic_gain {
+        config.mic_gain = g.clamp(0.5, 10.0);
     }
     engine.update_config(config);
     Ok(())
@@ -305,9 +310,9 @@ fn list_audio_processes(state: State<'_, EngineState>) -> Result<Vec<(String, St
 }
 
 #[tauri::command]
-fn start_bgm(state: State<'_, EngineState>, process_name: String, pid: u32) -> Result<(), String> {
+fn start_bgm(state: State<'_, EngineState>, pids: Vec<u32>) -> Result<(), String> {
     let engine = state.engine.lock();
-    engine.start_bgm(process_name, pid)
+    engine.start_bgm(pids)
 }
 
 #[tauri::command]
@@ -318,9 +323,9 @@ fn stop_bgm(state: State<'_, EngineState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn update_bgm_config(state: State<'_, EngineState>, volume: f32) -> Result<(), String> {
+fn update_bgm_config(state: State<'_, EngineState>, bgm_gain: f32) -> Result<(), String> {
     let engine = state.engine.lock();
-    engine.update_bgm_config(volume);
+    engine.update_bgm_config(bgm_gain);
     Ok(())
 }
 

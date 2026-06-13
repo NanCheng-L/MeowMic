@@ -37,6 +37,7 @@ export default {
     },
     monitor: 'Monitor',
     monitorDesc: 'Hear your own denoised voice through headphones',
+    micGain: 'Mic Gain',
   },
   bgm: {
     label: 'BGM Mixer',

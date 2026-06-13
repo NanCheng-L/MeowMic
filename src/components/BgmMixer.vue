@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -13,15 +13,15 @@ interface AudioProcess {
 
 const enabled = ref(false)
 const processes = ref<AudioProcess[]>([])
-const selectedPid = ref<number>(0)
-const selectedName = ref('')
-const bgmVolume = ref(30)
+const selectedPids = ref<Set<number>>(new Set())
+const bgmGain = ref(100)
 const loading = ref(false)
+const switching = ref(false)
 
-const bgmVolumeColor = computed(() => {
-  const v = bgmVolume.value
-  if (v < 33) return '#10b981'
-  if (v < 66) return '#06b6d4'
+const bgmGainColor = computed(() => {
+  const v = bgmGain.value
+  if (v < 100) return '#10b981'
+  if (v < 200) return '#06b6d4'
   return '#3b82f6'
 })
 
@@ -38,23 +38,11 @@ const handleToggle = async (val: boolean) => {
   loading.value = true
   try {
     if (val) {
-      // 没有进程时先开开关，等选了进程再混音
-      if (!selectedPid.value) {
-        if (processes.value.length > 0) {
-          selectedPid.value = processes.value[0].pid
-          selectedName.value = processes.value[0].name
-          await invoke('start_bgm', {
-            processName: selectedName.value,
-            pid: selectedPid.value,
-          })
-        }
-        // 没进程也开开关，只是不调 start_bgm
+      // 没有选中进程时先开开关
+      if (selectedPids.value.size === 0) {
         enabled.value = true
       } else {
-        await invoke('start_bgm', {
-          processName: selectedName.value,
-          pid: selectedPid.value,
-        })
+        await invoke('start_bgm', { pids: Array.from(selectedPids.value) })
         enabled.value = true
       }
     } else {
@@ -68,27 +56,60 @@ const handleToggle = async (val: boolean) => {
   }
 }
 
-const handleProcessChange = async () => {
-  const proc = processes.value.find(p => p.pid === selectedPid.value)
-  if (proc) {
-    selectedName.value = proc.name
-  }
-  if (enabled.value && selectedPid.value) {
-    // 如果之前没启动过（无进程时开的开关），直接启动；否则重启
-    try {
-      await invoke('stop_bgm')
-    } catch {}
-    await invoke('start_bgm', {
-      processName: selectedName.value,
-      pid: selectedPid.value,
-    })
+const toggleProcess = async (pid: number) => {
+  if (switching.value) return
+  switching.value = true
+  try {
+    const newSet = new Set(selectedPids.value)
+    if (newSet.has(pid)) {
+      newSet.delete(pid)
+    } else {
+      newSet.add(pid)
+    }
+    selectedPids.value = newSet
+
+    // 如果已开启，立即更新混音
+    if (enabled.value) {
+      try {
+        await invoke('stop_bgm')
+      } catch {}
+      if (newSet.size > 0) {
+        await invoke('start_bgm', { pids: Array.from(newSet) })
+      }
+    }
+  } finally {
+    switching.value = false
   }
 }
 
-const handleBgmVolumeChange = async (val: number) => {
-  bgmVolume.value = val
+const handleBgmGainChange = async (val: number) => {
+  bgmGain.value = val
   if (enabled.value) {
-    await invoke('update_bgm_config', { volume: val / 100 })
+    await invoke('update_bgm_config', { bgmGain: val / 100 })
+  }
+}
+
+const handleBgmGainDirect = async (val: number) => {
+  if (!isNaN(val)) {
+    const clamped = Math.max(0, Math.min(1000, val))
+    bgmGain.value = clamped
+    if (enabled.value) {
+      await invoke('update_bgm_config', { bgmGain: clamped / 100 })
+    }
+  }
+}
+
+const spinBgmGain = async (delta: number) => {
+  const newVal = Math.min(1000, Math.max(0, bgmGain.value + delta))
+  bgmGain.value = newVal
+  if (enabled.value) {
+    await invoke('update_bgm_config', { bgmGain: newVal / 100 })
+  }
+}
+
+const blockNegative = (e: KeyboardEvent) => {
+  if (e.key === '-' || e.key === 'e' || e.key === 'E' || e.key === '.') {
+    e.preventDefault()
   }
 }
 
@@ -96,8 +117,16 @@ const refreshProcesses = async () => {
   await loadProcesses()
 }
 
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   loadProcesses()
+  // 每 3 秒自动刷新进程列表
+  refreshTimer = setInterval(loadProcesses, 3000)
+})
+
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 </script>
 
@@ -124,18 +153,16 @@ onMounted(() => {
     </div>
     <p class="setting-desc">{{ t('bgm.desc') }}</p>
 
-    <div class="device-select">
-      <select
-        v-model="selectedPid"
-        @change="handleProcessChange"
-        :disabled="!enabled"
-        class="device-dropdown"
+    <div class="process-chips">
+      <button
+        v-for="proc in processes"
+        :key="proc.pid"
+        class="process-chip"
+        :class="{ active: selectedPids.has(proc.pid) }"
+        @click="toggleProcess(proc.pid)"
       >
-        <option :value="0" disabled>{{ t('bgm.selectProcess') }}</option>
-        <option v-for="proc in processes" :key="proc.pid" :value="proc.pid">
-          {{ proc.friendly }}
-        </option>
-      </select>
+        {{ proc.friendly }}
+      </button>
       <p v-if="processes.length === 0" class="no-process">{{ t('bgm.noProcess') }}</p>
     </div>
 
@@ -146,15 +173,31 @@ onMounted(() => {
           <input
             type="range"
             min="0"
-            max="100"
-            :value="bgmVolume"
-            @input="handleBgmVolumeChange(Number(($event.target as HTMLInputElement).value))"
-            :disabled="!enabled"
+            max="300"
+            :value="Math.min(bgmGain, 300)"
+            @input="handleBgmGainChange(Number(($event.target as HTMLInputElement).value))"
             class="slider"
-            :style="{ '--slider-color': bgmVolumeColor }"
+            :style="{ '--slider-color': bgmGainColor }"
           />
         </div>
-        <span class="volume-value">{{ bgmVolume }}%</span>
+        <div class="gain-input-wrapper">
+          <input
+            type="number"
+            class="gain-input"
+            :value="bgmGain"
+            @change="handleBgmGainDirect(Number(($event.target as HTMLInputElement).value))"
+            @focus="($event.target as HTMLInputElement).select()"
+            @keydown="blockNegative"
+            min="0"
+            max="1000"
+            step="10"
+          />
+          <span class="gain-percent">%</span>
+          <div class="gain-spinner">
+            <button class="spin-up" @click="spinBgmGain(10)">▲</button>
+            <button class="spin-down" @click="spinBgmGain(-10)">▼</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -244,30 +287,33 @@ onMounted(() => {
   transform: translateX(22px);
 }
 
-.device-select {
-  margin-top: 4px;
+.process-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.device-dropdown {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
+.process-chip {
+  padding: 5px 12px;
   border-radius: 8px;
-  padding: 8px 12px;
-  color: var(--text-primary);
-  font-size: 13px;
-  outline: none;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 12px;
   cursor: pointer;
-  appearance: none;
+  transition: all 0.2s;
+  white-space: nowrap;
 }
 
-.device-dropdown:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.device-dropdown:focus {
+.process-chip:hover {
   border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.process-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
 }
 
 .no-process {
@@ -334,5 +380,80 @@ onMounted(() => {
   min-width: 32px;
   text-align: right;
   font-family: 'DM Mono', monospace;
+}
+
+.gain-input-wrapper {
+  display: flex;
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.gain-input {
+  width: 40px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: 'DM Mono', monospace;
+  text-align: center;
+  outline: none;
+  padding: 3px 0;
+  -moz-appearance: textfield;
+}
+
+.gain-input::-webkit-outer-spin-button,
+.gain-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.gain-input:focus {
+  outline: none;
+}
+
+.gain-percent {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding-right: 6px;
+}
+
+.gain-spinner {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+.gain-spinner button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+
+.gain-spinner button:hover {
+  color: var(--text-primary);
+}
+
+.gain-spinner button:active {
+  color: var(--accent);
+}
+
+.gain-spinner .spin-up {
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gain-spinner .spin-down {
+  padding-top: 1px;
 }
 </style>

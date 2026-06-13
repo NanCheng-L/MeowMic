@@ -22,6 +22,7 @@ pub struct DenoiseConfig {
     pub enabled: bool,
     pub strength: f32,
     pub suppress_level: f32,
+    pub mic_gain: f32,
 }
 
 impl Default for DenoiseConfig {
@@ -30,24 +31,25 @@ impl Default for DenoiseConfig {
             enabled: true,
             strength: 0.5,
             suppress_level: 0.5,
+            mic_gain: 1.0,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BgmConfig {
-    pub process_name: Option<String>,
-    pub process_pid: Option<u32>,
-    pub volume: f32,
+    pub process_names: Vec<String>,
+    pub process_pids: Vec<u32>,
+    pub bgm_gain: f32,
     pub enabled: bool,
 }
 
 impl Default for BgmConfig {
     fn default() -> Self {
         Self {
-            process_name: None,
-            process_pid: None,
-            volume: 0.3,
+            process_names: Vec::new(),
+            process_pids: Vec::new(),
+            bgm_gain: 1.0,
             enabled: false,
         }
     }
@@ -173,6 +175,10 @@ impl AudioEngine {
         *self.config.write() = config;
     }
 
+    pub fn get_config(&self) -> DenoiseConfig {
+        self.config.read().clone()
+    }
+
     pub fn get_stats(&self) -> AudioStats {
         self.stats.read().clone()
     }
@@ -182,8 +188,8 @@ impl AudioEngine {
         list_audio_processes()
     }
 
-    /// 启动 BGM 捕获线程（按进程 PID）
-    pub fn start_bgm(&self, process_name: String, pid: u32) -> Result<(), String> {
+    /// 启动 BGM 捕获线程（按进程 PID 列表，每个 PID 一个线程）
+    pub fn start_bgm(&self, pids: Vec<u32>) -> Result<(), String> {
         // 如果旧线程还在运行，先停止并等待退出
         self.stop_bgm();
 
@@ -192,26 +198,40 @@ impl AudioEngine {
         // 更新配置
         {
             let mut cfg = self.bgm_config.write();
-            cfg.process_name = Some(process_name);
-            cfg.process_pid = Some(pid);
+            cfg.process_pids = pids.clone();
             cfg.enabled = true;
         }
 
         let bgm_running = self.bgm_running.clone();
         bgm_running.store(true, Ordering::Relaxed);
-        let bgm_config = self.bgm_config.clone();
 
-        let handle = std::thread::Builder::new()
-            .name("bgm-loopback".into())
+        // 为每个 PID 启动一个独立的 loopback 线程
+        let mut handles = Vec::new();
+        for pid in pids {
+            let sender_clone = sender.clone();
+            let running_clone = bgm_running.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("bgm-loopback-{}", pid))
+                .spawn(move || {
+                    if let Err(e) = bgm_process_loop(running_clone, sender_clone, pid) {
+                        log::error!("BGM process loopback error for pid {}: {}", pid, e);
+                    }
+                })
+                .map_err(|e| format!("Failed to spawn BGM thread: {}", e))?;
+            handles.push(handle);
+        }
+
+        // 存储所有线程句柄，stop_bgm() 时 join
+        let manager_handle = std::thread::Builder::new()
+            .name("bgm-manager".into())
             .spawn(move || {
-                if let Err(e) = bgm_process_loop(bgm_running, bgm_config, sender, pid) {
-                    log::error!("BGM process loopback error: {}", e);
+                for handle in handles {
+                    let _ = handle.join();
                 }
             })
-            .map_err(|e| format!("Failed to spawn BGM thread: {}", e))?;
+            .map_err(|e| format!("Failed to spawn BGM manager: {}", e))?;
 
-        // 存储线程句柄，stop_bgm() 时 join
-        *self.bgm_thread_handle.lock().unwrap() = Some(handle);
+        *self.bgm_thread_handle.lock().unwrap() = Some(manager_handle);
 
         Ok(())
     }
@@ -229,10 +249,10 @@ impl AudioEngine {
         while self.bgm_receiver.try_recv().is_ok() {}
     }
 
-    /// 更新 BGM 配置（音量等）
-    pub fn update_bgm_config(&self, volume: f32) {
+    /// 更新 BGM 配置（增益等）
+    pub fn update_bgm_config(&self, bgm_gain: f32) {
         let mut cfg = self.bgm_config.write();
-        cfg.volume = volume.clamp(0.0, 1.0);
+        cfg.bgm_gain = bgm_gain.clamp(0.0, 10.0);
     }
 
     /// 设置爆炸模式
@@ -251,104 +271,455 @@ impl AudioEngine {
     }
 }
 
-/// 列出正在播放音频的进程
+/// 列出正在播放音频的进程（使用 IAudioSessionManager2 枚举所有活跃音频会话）
 #[cfg(windows)]
 fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
     use std::collections::HashSet;
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
+    use windows::core::*;
+    use windows::Win32::System::Com::*;
+    use windows::Win32::Media::Audio::*;
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
 
+    // 第一步：用 ToolHelp 构建 pid → exe全路径 的映射，用于读取版本信息
+    let mut pid_to_path: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut pid_to_exe: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-            .map_err(|e| format!("Failed to create snapshot: {}", e))?;
-
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..std::mem::zeroed()
-        };
-
-        let mut processes = Vec::new();
-        let mut seen_apps: HashSet<String> = HashSet::new();
-
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
-            loop {
-                let name = String::from_utf16_lossy(
-                    &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0)],
-                );
-                let pid = entry.th32ProcessID;
-
-                // 只显示常见音乐/视频播放器进程
-                let lower = name.to_lowercase();
-                let is_media = lower.contains("cloudmusic")      // 网易云
-                    || lower.contains("qqmusic")       // QQ 音乐
-                    || lower.contains("kugou")         // 酷狗
-                    || lower.contains("kuwo")          // 酷我
-                    || lower.contains("kwmusic")       // 酷我
-                    || lower.contains("spotify")       // Spotify
-                    || lower.contains("foobar")        // foobar2000
-                    || lower.contains("aimp")          // AIMP
-                    || lower.contains("musicbee")      // MusicBee
-                    || lower.contains("winamp")        // Winamp
-                    || lower.contains("potplayer")     // PotPlayer
-                    || lower.contains("vlc")           // VLC
-                    || lower.contains("mpv");          // mpv
-
-                // 过滤掉 reporter/crash/helper 等辅助进程
-                let is_helper = lower.contains("reporter")
-                    || lower.contains("crash")
-                    || lower.contains("helper")
-                    || lower.contains("update")
-                    || lower.contains("service")
-                    || lower.contains("agent");
-
-                // 按应用名去重，同一应用只显示一个（include_tree 会捕获所有子进程）
-                if is_media && !is_helper {
-                    let app_key = if lower.contains("cloudmusic") { "cloudmusic" }
-                        else if lower.contains("qqmusic") { "qqmusic" }
-                        else if lower.contains("kugou") { "kugou" }
-                        else if lower.contains("kuwo") || lower.contains("kwmusic") { "kuwo" }
-                        else if lower.contains("spotify") { "spotify" }
-                        else if lower.contains("foobar") { "foobar" }
-                        else if lower.contains("aimp") { "aimp" }
-                        else if lower.contains("musicbee") { "musicbee" }
-                        else if lower.contains("winamp") { "winamp" }
-                        else if lower.contains("potplayer") { "potplayer" }
-                        else if lower.contains("vlc") { "vlc" }
-                        else if lower.contains("mpv") { "mpv" }
-                        else { &lower };
-
-                    if !seen_apps.contains(app_key) {
-                        seen_apps.insert(app_key.to_string());
-                        let friendly = match app_key {
-                            "cloudmusic" => "网易云音乐",
-                            "qqmusic" => "QQ 音乐",
-                            "kugou" => "酷狗音乐",
-                            "kuwo" => "酷我音乐",
-                            "spotify" => "Spotify",
-                            "foobar" => "foobar2000",
-                            "aimp" => "AIMP",
-                            "musicbee" => "MusicBee",
-                            "winamp" => "Winamp",
-                            "potplayer" => "PotPlayer",
-                            "vlc" => "VLC",
-                            "mpv" => "mpv",
-                            _ => &name,
-                        };
-                        processes.push((friendly.to_string(), name, pid));
+        if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..std::mem::zeroed()
+            };
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let pid = entry.th32ProcessID;
+                    let exe = String::from_utf16_lossy(
+                        &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0)],
+                    );
+                    pid_to_exe.insert(pid, exe.clone());
+                    // 用 Module32First 获取 exe 全路径
+                    let mut mod_entry = MODULEENTRY32W {
+                        dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
+                        ..std::mem::zeroed()
+                    };
+                    if let Ok(mod_snap) = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) {
+                        if Module32FirstW(mod_snap, &mut mod_entry).is_ok() {
+                            let path = String::from_utf16_lossy(
+                                &mod_entry.szExePath[..mod_entry.szExePath.iter().position(|&c| c == 0).unwrap_or(0)],
+                            );
+                            pid_to_path.insert(pid, path);
+                        }
+                        let _ = windows::Win32::Foundation::CloseHandle(mod_snap);
+                    }
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
                     }
                 }
+            }
+            let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+        }
+    }
 
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
+    // 第二步：用 IAudioSessionManager2 获取所有有音频会话的进程（包括暂停的）
+    let my_pid = std::process::id();
+    let mut active_pids: Vec<u32> = Vec::new();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
+
+        if let Ok(device_enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(
+            &MMDeviceEnumerator,
+            None,
+            CLSCTX_ALL,
+        ) {
+            if let Ok(default_device) = device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+                if let Ok(session_manager) = default_device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                    if let Ok(session_enumerator) = session_manager.GetSessionEnumerator() {
+                        if let Ok(count) = session_enumerator.GetCount() {
+                            for i in 0..count {
+                                if let Ok(control) = session_enumerator.GetSession(i) {
+                                    if let Ok(simple) = control.cast::<IAudioSessionControl2>() {
+                                        if let Ok(pid) = simple.GetProcessId() {
+                                            let pid = pid as u32;
+                                            if pid > 0 && pid != my_pid {
+                                                active_pids.push(pid);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-
-        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
-        Ok(processes)
     }
+
+    // 第三步：合并结果
+    let mut processes = Vec::new();
+    let mut seen_pids: HashSet<u32> = HashSet::new();
+    for pid in active_pids {
+        if seen_pids.contains(&pid) {
+            continue;
+        }
+        seen_pids.insert(pid);
+        let exe = pid_to_exe.get(&pid).cloned().unwrap_or_default();
+        let exe_lower = exe.to_lowercase();
+
+        // 优先级：映射表 > 窗口标题清理 > FileDescription > 注册表 > ProductName > exe名
+        // 映射表：找所有匹配项，选最长的 key（最具体的）
+        let friendly = APP_NAME_MAP.iter()
+            .filter(|(key, _)| exe_lower.contains(*key))
+            .max_by_key(|(key, _)| key.len())
+            .map(|(_, name)| name.to_string())
+            .or_else(|| {
+                get_window_title_for_pid(pid)
+                    .map(|t| clean_window_title(&t))
+                    .filter(|s| !s.is_empty() && s.len() > 1)
+            })
+            .or_else(|| {
+                pid_to_path.get(&pid).and_then(|path| get_file_description(path))
+            })
+            .or_else(|| {
+                let exe_name = exe.strip_suffix(".exe").unwrap_or(&exe);
+                get_app_display_name_from_registry(exe_name)
+            })
+            .or_else(|| {
+                pid_to_path.get(&pid).and_then(|path| get_product_name_from_path(path))
+            })
+            .unwrap_or_else(|| exe.strip_suffix(".exe").unwrap_or(&exe).to_string());
+        processes.push((friendly, exe, pid));
+    }
+
+    Ok(processes)
+}
+
+/// 常见应用兜底映射（exe名包含匹配，长的优先）
+const APP_NAME_MAP: &[(&str, &str)] = &[
+    ("qqbrowser", "QQ 浏览器"),
+    ("cloudmusic", "网易云音乐"),
+    ("qqmusic", "QQ 音乐"),
+    ("kugou", "酷狗音乐"),
+    ("kwmusic", "酷我音乐"),
+    ("kuwo", "酷我音乐"),
+    ("musicbee", "MusicBee"),
+    ("foobar", "foobar2000"),
+    ("winamp", "Winamp"),
+    ("potplayer", "PotPlayer"),
+    ("spotify", "Spotify"),
+    ("douyin", "抖音"),
+    ("wechat", "微信"),
+    ("obs64", "OBS Studio"),
+    ("obs32", "OBS Studio"),
+    ("itunes", "iTunes"),
+    ("aimp", "AIMP"),
+    ("chrome", "Chrome"),
+    ("msedge", "Edge"),
+    ("firefox", "Firefox"),
+    ("steam", "Steam"),
+    ("qq", "QQ"),
+];
+
+/// 清理窗口标题，去掉动态后缀
+fn clean_window_title(title: &str) -> String {
+    let mut result = title.to_string();
+
+    // 去掉 " - " 后面的内容（OBS: "OBS 32.1.2 - 配置文件: xxx - 场景: xxx"）
+    if let Some(pos) = result.find(" - ") {
+        let prefix = result[..pos].to_string();
+        if prefix.len() >= 2 {
+            result = prefix;
+        }
+    }
+
+    // 去掉末尾的版本号（如 "OBS 32.1.2" → "OBS"）
+    // 手动匹配：从末尾往前找 " 数字.数字(.数字)"
+    if let Some(last_space) = result.rfind(' ') {
+        let after_space = &result[last_space + 1..];
+        let parts: Vec<&str> = after_space.split('.').collect();
+        if parts.len() >= 2 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())) {
+            result = result[..last_space].to_string();
+        }
+    }
+
+    result
+}
+
+/// 获取进程主窗口的标题（本地化名称）
+#[cfg(windows)]
+fn get_window_title_for_pid(pid: u32) -> Option<String> {
+    extern "system" {
+        pub fn EnumWindows(
+            callback: *mut core::ffi::c_void,
+            lparam: isize,
+        ) -> windows::Win32::Foundation::BOOL;
+        pub fn GetWindowThreadProcessId(
+            hwnd: windows::Win32::Foundation::HWND,
+            process_id: *mut u32,
+        ) -> u32;
+        pub fn GetWindowTextW(
+            hwnd: windows::Win32::Foundation::HWND,
+            buf: *mut u16,
+            max_count: i32,
+        ) -> i32;
+        pub fn IsWindowVisible(hwnd: windows::Win32::Foundation::HWND) -> windows::Win32::Foundation::BOOL;
+    }
+
+    struct EnumCtx {
+        target_pid: u32,
+        found_title: Option<String>,
+    }
+
+    unsafe extern "system" fn enum_callback(hwnd: windows::Win32::Foundation::HWND, lparam: isize) -> windows::Win32::Foundation::BOOL {
+        let ctx = &mut *(lparam as *mut EnumCtx);
+        let mut window_pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut window_pid);
+        if window_pid == ctx.target_pid && IsWindowVisible(hwnd).as_bool() {
+            let mut buf = [0u16; 256];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                if !title.is_empty() {
+                    ctx.found_title = Some(title);
+                }
+            }
+        }
+        windows::Win32::Foundation::BOOL(1) // continue enumeration
+    }
+
+    unsafe {
+        let mut ctx = EnumCtx { target_pid: pid, found_title: None };
+        let _ = EnumWindows(
+            enum_callback as *mut _,
+            &mut ctx as *mut _ as isize,
+        );
+        ctx.found_title
+    }
+}
+
+/// 从 exe 版本信息中读取 FileDescription（比 ProductName 更准确）
+#[cfg(windows)]
+fn get_file_description(path: &str) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        pub fn GetFileVersionInfoSizeW(filename: *const u16, dummy: *mut u32) -> u32;
+        pub fn GetFileVersionInfoW(filename: *const u16, handle: u32, size: u32, data: *mut core::ffi::c_void) -> windows::Win32::Foundation::BOOL;
+        pub fn VerQueryValueW(block: *const core::ffi::c_void, subblock: *const u16, buffer: *mut *mut core::ffi::c_void, size: *mut u32) -> windows::Win32::Foundation::BOOL;
+    }
+
+    let path_wide: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let size = GetFileVersionInfoSizeW(path_wide.as_ptr(), std::ptr::null_mut());
+        if size == 0 { return None; }
+
+        let mut buffer = vec![0u8; size as usize];
+        if !GetFileVersionInfoW(path_wide.as_ptr(), 0, size, buffer.as_mut_ptr() as *mut _).as_bool() {
+            return None;
+        }
+
+        // 先查 Translation 获取实际语言码
+        let mut lang_ptr: *mut u8 = std::ptr::null_mut();
+        let mut lang_len: u32 = 0;
+        let trans_query: Vec<u16> = OsStr::new("\\VarFileInfo\\Translation").encode_wide().chain(std::iter::once(0)).collect();
+
+        let mut queries_to_try: Vec<String> = Vec::new();
+
+        if VerQueryValueW(buffer.as_ptr() as *const _, trans_query.as_ptr(), &mut lang_ptr as *mut *mut _ as *mut *mut _, &mut lang_len).as_bool()
+            && !lang_ptr.is_null() && lang_len >= 4
+        {
+            let lang_data = std::slice::from_raw_parts(lang_ptr as *const u16, lang_len as usize / 2);
+            let lang = lang_data[0];
+            let codepage = lang_data[1];
+            queries_to_try.push(format!("\\StringFileInfo\\{:04X}{:04X}\\FileDescription", lang, codepage));
+        }
+        queries_to_try.push("\\StringFileInfo\\080404B0\\FileDescription".to_string());
+        queries_to_try.push("\\StringFileInfo\\040904B0\\FileDescription".to_string());
+        queries_to_try.push("\\StringFileInfo\\040904E4\\FileDescription".to_string());
+        queries_to_try.push("\\StringFileInfo\\040404B0\\FileDescription".to_string());
+
+        for query in &queries_to_try {
+            let query_wide: Vec<u16> = OsStr::new(query).encode_wide().chain(std::iter::once(0)).collect();
+            let mut value_ptr: *mut u16 = std::ptr::null_mut();
+            let mut value_len: u32 = 0;
+
+            if VerQueryValueW(buffer.as_ptr() as *const _, query_wide.as_ptr(), &mut value_ptr as *mut *mut _ as *mut *mut _, &mut value_len).as_bool()
+                && !value_ptr.is_null() && value_len > 1
+            {
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(value_ptr, (value_len - 1) as usize));
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从注册表查询应用显示名
+#[cfg(windows)]
+fn get_app_display_name_from_registry(exe_name: &str) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        pub fn RegOpenKeyExW(
+            hkey: isize,
+            subkey: *const u16,
+            reserved: u32,
+            sam: u32,
+            phkresult: *mut isize,
+        ) -> i32;
+        pub fn RegQueryValueExW(
+            hkey: isize,
+            valuename: *const u16,
+            reserved: *mut u32,
+            pdwtype: *mut u32,
+            pbdata: *mut u8,
+            pcbdata: *mut u32,
+        ) -> i32;
+        pub fn RegCloseKey(hkey: isize) -> i32;
+    }
+
+    const HKEY_LOCAL_MACHINE: isize = 0x80000002;
+    const KEY_READ: u32 = 0x20019;
+    const REG_SZ: u32 = 1;
+
+    // 尝试 App Paths 和 Uninstall 两个位置
+    let registry_paths = [
+        format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{}.exe", exe_name),
+        format!("SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", exe_name),
+        format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", exe_name),
+    ];
+
+    for reg_path in &registry_paths {
+        let key_wide: Vec<u16> = OsStr::new(reg_path).encode_wide().chain(std::iter::once(0)).collect();
+        let name_wide: Vec<u16> = OsStr::new("DisplayName").encode_wide().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            let mut hkey: isize = 0;
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, key_wide.as_ptr(), 0, KEY_READ, &mut hkey) == 0 {
+                let mut buf = [0u16; 256];
+                let mut buf_len = (buf.len() * 2) as u32;
+                let mut reg_type: u32 = 0;
+                if RegQueryValueExW(hkey, name_wide.as_ptr(), std::ptr::null_mut(), &mut reg_type, buf.as_mut_ptr() as *mut u8, &mut buf_len) == 0
+                    && reg_type == REG_SZ
+                {
+                    let len = (buf_len / 2) as usize;
+                    let name = String::from_utf16_lossy(&buf[..len]);
+                    let _ = RegCloseKey(hkey);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+                let _ = RegCloseKey(hkey);
+            }
+        }
+    }
+
+    None
+}
+
+/// 从 exe 文件的版本信息中读取 ProductName
+#[cfg(windows)]
+fn get_product_name_from_path(path: &str) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        pub fn GetFileVersionInfoSizeW(
+            filename: *const u16,
+            dummy: *mut u32,
+        ) -> u32;
+        pub fn GetFileVersionInfoW(
+            filename: *const u16,
+            handle: u32,
+            size: u32,
+            data: *mut core::ffi::c_void,
+        ) -> windows::Win32::Foundation::BOOL;
+        pub fn VerQueryValueW(
+            block: *const core::ffi::c_void,
+            subblock: *const u16,
+            buffer: *mut *mut core::ffi::c_void,
+            size: *mut u32,
+        ) -> windows::Win32::Foundation::BOOL;
+    }
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let size = GetFileVersionInfoSizeW(path_wide.as_ptr(), std::ptr::null_mut());
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        if !GetFileVersionInfoW(path_wide.as_ptr(), 0, size, buffer.as_mut_ptr() as *mut _).as_bool() {
+            return None;
+        }
+
+        // 先查询 VarFileInfo\Translation 获取实际语言码和代码页
+        let mut lang_ptr: *mut u8 = std::ptr::null_mut();
+        let mut lang_len: u32 = 0;
+        let trans_query: Vec<u16> = OsStr::new("\\VarFileInfo\\Translation")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut queries_to_try: Vec<String> = Vec::new();
+
+        if VerQueryValueW(
+            buffer.as_ptr() as *const _,
+            trans_query.as_ptr(),
+            &mut lang_ptr as *mut *mut _ as *mut *mut _,
+            &mut lang_len,
+        ).as_bool() && !lang_ptr.is_null() && lang_len >= 4
+        {
+            // Translation 是 LANG + CODEPAGE 的数组，每个 4 字节
+            let lang_data = std::slice::from_raw_parts(lang_ptr as *const u16, lang_len as usize / 2);
+            let lang = lang_data[0];
+            let codepage = lang_data[1];
+            // 用实际语言码构造查询
+            let query = format!("\\StringFileInfo\\{:04X}{:04X}\\ProductName", lang, codepage);
+            queries_to_try.push(query);
+        }
+
+        // fallback：常见语言码
+        queries_to_try.push("\\StringFileInfo\\080404B0\\ProductName".to_string());
+        queries_to_try.push("\\StringFileInfo\\040904B0\\ProductName".to_string());
+        queries_to_try.push("\\StringFileInfo\\040904E4\\ProductName".to_string());
+        queries_to_try.push("\\StringFileInfo\\040404B0\\ProductName".to_string());
+
+        for query in &queries_to_try {
+            let query_wide: Vec<u16> = OsStr::new(query)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut value_ptr: *mut u16 = std::ptr::null_mut();
+            let mut value_len: u32 = 0;
+
+            if VerQueryValueW(
+                buffer.as_ptr() as *const _,
+                query_wide.as_ptr(),
+                &mut value_ptr as *mut *mut _ as *mut *mut _,
+                &mut value_len,
+            ).as_bool() && !value_ptr.is_null() && value_len > 1
+            {
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+                    value_ptr,
+                    (value_len - 1) as usize,
+                ));
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(not(windows))]
@@ -359,7 +730,6 @@ fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
 /// BGM 按进程捕获线程：使用 WASAPI Process Loopback API
 fn bgm_process_loop(
     running: Arc<AtomicBool>,
-    _config: Arc<RwLock<BgmConfig>>,
     sender: Sender<Vec<i16>>,
     pid: u32,
 ) -> Result<(), String> {
@@ -812,6 +1182,10 @@ fn audio_loop(
                             output_samples
                         };
 
+                    // 应用麦克风增益（在降噪后，避免放大噪音）
+                    let mic_gain = current_config.mic_gain;
+                    let mixed_samples: Vec<f32> = mixed_samples.iter().map(|s| s * mic_gain).collect();
+
                     // ============ 💥 爆炸模式：方波失真 ============
                     let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
                         let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
@@ -891,8 +1265,7 @@ fn audio_loop(
                             bgm_buf.drain(..drain);
                         }
 
-                        let bgm_vol_raw = bgm_config.read().volume;
-                        let bgm_vol = bgm_vol_raw.sqrt() * 0.4;
+                        let bgm_gain = bgm_config.read().bgm_gain;
 
                         mixed_samples
                             .iter()
@@ -913,7 +1286,7 @@ fn audio_loop(
                                     0.0
                                 };
                                 let bgm_mono = (bgm_l + bgm_r) / 2.0;
-                                mic_sample + bgm_mono * bgm_vol
+                                mic_sample + bgm_mono * bgm_gain
                             })
                             .collect()
                     } else {

@@ -37,6 +37,7 @@ export default {
     },
     monitor: '监听',
     monitorDesc: '开启后可通过耳机听到自己降噪后的声音',
+    micGain: '麦克风增益',
   },
   bgm: {
     label: 'BGM 混音',

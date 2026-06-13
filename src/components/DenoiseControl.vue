@@ -24,6 +24,7 @@ const props = defineProps<{
   preset: string
   loading: boolean
   monitorEnabled: boolean
+  micGain: number
 }>()
 
 const emit = defineEmits<{
@@ -32,6 +33,7 @@ const emit = defineEmits<{
   'update:model': [value: string]
   'update:preset': [value: string]
   'update:monitorEnabled': [value: boolean]
+  'update:micGain': [value: number]
 }>()
 
 // 当前预设是否匹配某个内置预设
@@ -67,6 +69,38 @@ const strengthLabel = computed(() => {
 })
 
 const strengthPercent = computed(() => Math.round(props.strength * 100))
+
+const micGainPercent = computed(() => Math.round(props.micGain * 100))
+
+const micGainColor = computed(() => {
+  const g = props.micGain
+  if (g <= 1.0) return '#10b981'
+  if (g <= 2.0) return '#06b6d4'
+  return '#3b82f6'
+})
+
+const handleMicGainInput = (e: Event) => {
+  const val = Number((e.target as HTMLInputElement).value) / 100
+  emit('update:micGain', val)
+}
+
+const handleMicGainInputDirect = (e: Event) => {
+  const val = Number((e.target as HTMLInputElement).value)
+  if (!isNaN(val)) {
+    emit('update:micGain', Math.max(0, Math.min(1000, val)) / 100)
+  }
+}
+
+const spinMicGain = (delta: number) => {
+  const newVal = Math.min(1000, Math.max(0, props.micGain * 100 + delta))
+  emit('update:micGain', newVal / 100)
+}
+
+const blockNegative = (e: KeyboardEvent) => {
+  if (e.key === '-' || e.key === 'e' || e.key === 'E' || e.key === '.') {
+    e.preventDefault()
+  }
+}
 
 // 拖滑块时自动切到自定义
 const handleSliderInput = (e: Event) => {
@@ -162,6 +196,41 @@ const handleSliderInput = (e: Event) => {
         <span>{{ t('denoise.light') }}</span>
         <span>{{ t('denoise.medium') }}</span>
         <span>{{ t('denoise.strong') }}</span>
+      </div>
+    </div>
+
+    <div class="gain-section">
+      <div class="gain-row">
+        <span class="gain-label">{{ t('denoise.micGain') }}</span>
+        <div class="slider-wrapper">
+          <input
+            type="range"
+            min="50"
+            max="300"
+            :value="Math.min(micGainPercent, 300)"
+            @input="handleMicGainInput"
+            class="slider"
+            :style="{ '--slider-color': micGainColor }"
+          />
+        </div>
+        <div class="gain-input-wrapper">
+          <input
+            type="number"
+            class="gain-input"
+            :value="micGainPercent"
+            @change="handleMicGainInputDirect"
+            @focus="($event.target as HTMLInputElement).select()"
+            @keydown="blockNegative"
+            min="0"
+            max="1000"
+            step="10"
+          />
+          <span class="gain-percent">%</span>
+          <div class="gain-spinner">
+            <button class="spin-up" @click="spinMicGain(10)" :disabled="!enabled">▲</button>
+            <button class="spin-down" @click="spinMicGain(-10)" :disabled="!enabled">▼</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -363,6 +432,111 @@ const handleSliderInput = (e: Event) => {
   justify-content: space-between;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.gain-section {
+  margin-top: 8px;
+}
+
+.gain-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gain-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 60px;
+  flex-shrink: 0;
+}
+
+.slider-wrapper {
+  flex: 1;
+}
+
+.gain-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  min-width: 40px;
+  text-align: right;
+  font-family: 'DM Mono', monospace;
+}
+
+.gain-input-wrapper {
+  display: flex;
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.gain-input {
+  width: 40px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: 'DM Mono', monospace;
+  text-align: center;
+  outline: none;
+  padding: 3px 0;
+  -moz-appearance: textfield;
+}
+
+.gain-input::-webkit-outer-spin-button,
+.gain-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.gain-input:focus {
+  outline: none;
+}
+
+.gain-percent {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding-right: 6px;
+}
+
+.gain-spinner {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+.gain-spinner button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+
+.gain-spinner button:hover {
+  color: var(--text-primary);
+}
+
+.gain-spinner button:active {
+  color: var(--accent);
+}
+
+.gain-spinner .spin-up {
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gain-spinner .spin-down {
+  padding-top: 1px;
 }
 
 .monitor-row {
