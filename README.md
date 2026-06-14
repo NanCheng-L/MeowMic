@@ -27,6 +27,7 @@
 - BGM 混音（按进程捕获音乐播放器音频，混合到麦克风输出）
 - 一键炸麦（恶搞模式，增益 + 方波失真，强度可调 1-100%）
 - 监听模式（开关式，自动使用系统默认输出设备，实时听到降噪效果）
+- 均衡器（10 段可视化 EQ，参考 SteelSeries GG Sonar 设计，Canvas 曲线图 + 可拖拽圆点 + 7 个预设）
 - 设置界面（独立窗口，快捷键配置、开机自启开关、语言切换）
 - 使用教程（独立窗口，设备说明 + FAQ + 社交链接）
 - VB-Audio Virtual Cable 虚拟设备引导
@@ -91,6 +92,8 @@ src/                    # Vue 3 前端
 │   ├── BgmMixer        # BGM 混音控制
 │   ├── DenoiseControl  # 降噪控制
 │   ├── DeviceSelector  # 设备选择
+│   ├── EqControl       # 均衡器开关按钮
+│   ├── EqPage          # 均衡器界面（独立窗口，Canvas 曲线图）
 │   ├── ExplodeButton   # 一键炸麦
 │   ├── SettingsPage    # 设置界面（独立窗口）
 │   ├── TutorialPage    # 使用教程（独立窗口）
@@ -103,8 +106,11 @@ src/                    # Vue 3 前端
 src-tauri/src/          # Rust 后端
 ├── audio_engine.rs     # WASAPI 音频引擎
 ├── denoise/            # 降噪模型架构（trait + 适配器）
+├── eq.rs               # EQ 均衡器（Biquad IIR 滤波器）
 ├── device_watcher.rs   # 设备热拔插检测
 └── lib.rs              # Tauri 命令 + 系统托盘 + 设置管理
+docs/                   # 文档
+└── eq-spec.md          # 均衡器功能规格（参考 SteelSeries GG Sonar）
 ```
 
 ## 快捷键
