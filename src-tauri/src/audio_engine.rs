@@ -1134,6 +1134,7 @@ fn audio_loop(
 
     let mut loop_iteration: u64 = 0;
     let mut consecutive_zero_reads: u32 = 0;
+    let mut consecutive_read_errors: u32 = 0;
     while running.load(Ordering::Relaxed) {
         if input_handle.wait_for_event(100).is_err() {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1145,6 +1146,7 @@ fn audio_loop(
 
         match input_capture.read_from_device(&mut input_buffer) {
             Ok((frames_read, _flags)) => {
+                consecutive_read_errors = 0; // 重置错误计数
                 if frames_read == 0 {
                     consecutive_zero_reads += 1;
                     if consecutive_zero_reads >= 100 {
@@ -1463,7 +1465,17 @@ fn audio_loop(
                 } // end while input_acc.len() >= frame_size
             }
             Err(e) => {
-                log::warn!("Failed to read input: {}", e);
+                consecutive_read_errors += 1;
+                log::warn!("Failed to read input: {} (consecutive: {})", e, consecutive_read_errors);
+                // 连续读取失败超过 10 次，主动停止输出流，避免残余音频导致回音
+                if consecutive_read_errors >= 10 {
+                    debug_log(&format!("Input device disconnected ({} errors), stopping output stream", consecutive_read_errors));
+                    let _ = output_client.stop_stream();
+                    if let Some(ref m_client) = monitor_client_opt {
+                        let _ = m_client.stop_stream();
+                    }
+                    monitor_was_streaming = false;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
