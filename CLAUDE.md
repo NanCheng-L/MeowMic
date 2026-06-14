@@ -90,6 +90,8 @@ scripts/                # 构建/发布辅助脚本
 - **进程名获取不可靠**：FileDescription 对国产软件（网易云、抖音、QQ浏览器）通常返回英文或截断值，必须用 exe 名映射表兜底；窗口标题包含动态内容（歌名、场景名），需清理 " - " 后缀和版本号
 - **BGM 多选进程**：每个 PID 启动独立 WASAPI loopback 线程，通过同一 channel 发送混音数据，用 manager 线程 join 所有子线程
 - **设备热拔插恢复**：`lastUserInput` 只在用户手动选设备和启动加载时更新，`devices-changed` 处理器绝不能覆盖；Vue watch 异步执行，不能用同步标志位区分用户/系统变更
+- **EQ loadEqConfig 加载顺序**：后端 `EqConfig` 在 engine 重启后 bands 恢复为全 0（default）。`loadEqConfig` 必须优先从 `localStorage('meowmic-eq-preset')` 读取预设名，用 `presets.find()` 获取正确的 bands 值，不能直接用后端返回的 bands——否则预设名正确但曲线平坦。同时 `loadPresets()` 必须在 `loadEqConfig()` 之前完成（不能用 `Promise.all`），否则 presets 数组为空
+- **EQ 跨窗口状态同步**：`loadEqConfig` 从 `localStorage('meowmic-config')` 读取 `eqEnabled` 并同步到后端，而非从后端读取（后端不持久化）。同时在 EqPage.vue 中监听 `eq-changed` Tauri 事件实时更新 toggle 状态
 - **WASAPI IAudioSessionManager2**：枚举音频会话需要 `Win32_System_Com` + `Win32_Media_Audio` feature；活跃会话始终显示，非活跃会话仅保留映射表中的已知播放器（避免系统进程如 audiodg 出现）；同名进程按名称去重
 
 ## 版本号管理

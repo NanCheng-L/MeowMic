@@ -70,14 +70,35 @@ const BAND_COLORS = [
 
 const loadEqConfig = async () => {
   try {
+    // 从 localStorage 恢复 EQ 开关状态（与主窗口同步）
+    const savedConfig = localStorage.getItem('meowmic-config')
+    if (savedConfig) {
+      const config = JSON.parse(savedConfig)
+      if (config.eqEnabled !== undefined) {
+        enabled.value = config.eqEnabled
+        // 同步到后端
+        await invoke('update_eq_config', { enabled: config.eqEnabled })
+      }
+    }
+
+    // 恢复预设选择，用预设值覆盖 bands
+    const savedPreset = localStorage.getItem('meowmic-eq-preset')
+    if (savedPreset && savedPreset !== 'custom') {
+      const preset = presets.value.find(([k]) => k === savedPreset)
+      if (preset) {
+        bands.value = [...preset[1]]
+        activePreset.value = savedPreset
+        // 同步到后端
+        await invoke('update_eq_config', { bands: bands.value })
+        return
+      }
+    }
+
+    // fallback: 从后端读取
     const config = await invoke<{ enabled: boolean; bands: number[] }>('get_eq_config')
     enabled.value = config.enabled
     bands.value = [...config.bands]
-    // 恢复预设选择
-    const savedPreset = localStorage.getItem('meowmic-eq-preset')
-    if (savedPreset) {
-      activePreset.value = savedPreset
-    }
+    activePreset.value = savedPreset || 'flat'
   } catch (e) {
     console.error('Failed to load EQ config:', e)
   }
@@ -504,7 +525,8 @@ onMounted(async () => {
   // 跨窗口语言同步
   window.addEventListener('storage', handleStorage)
 
-  await Promise.all([loadEqConfig(), loadPresets()])
+  await loadPresets()
+  await loadEqConfig()
   await nextTick()
 
   if (canvasRef.value) {
