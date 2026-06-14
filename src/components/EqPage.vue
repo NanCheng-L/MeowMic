@@ -73,6 +73,11 @@ const loadEqConfig = async () => {
     const config = await invoke<{ enabled: boolean; bands: number[] }>('get_eq_config')
     enabled.value = config.enabled
     bands.value = [...config.bands]
+    // 恢复预设选择
+    const savedPreset = localStorage.getItem('meowmic-eq-preset')
+    if (savedPreset) {
+      activePreset.value = savedPreset
+    }
   } catch (e) {
     console.error('Failed to load EQ config:', e)
   }
@@ -96,6 +101,7 @@ const applyPreset = (name: string) => {
   if (preset) {
     bands.value = [...preset[1]]
     activePreset.value = name
+    localStorage.setItem('meowmic-eq-preset', name)
     syncToBackend()
     draw()
   }
@@ -126,6 +132,7 @@ const syncToBackend = () => {
 const handleReset = () => {
   bands.value = new Array(10).fill(0)
   activePreset.value = 'flat'
+  localStorage.setItem('meowmic-eq-preset', 'flat')
   syncToBackend()
   draw()
 }
@@ -402,6 +409,7 @@ const handleMouseMove = (e: MouseEvent) => {
       frequencies.value[draggingBand] = newFreq
     }
     activePreset.value = 'custom'
+    localStorage.setItem('meowmic-eq-preset', 'custom')
     syncToBackend()
     // 更新悬停提示框位置
     hoverBandIdx.value = draggingBand
