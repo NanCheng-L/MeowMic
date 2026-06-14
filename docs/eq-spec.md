@@ -19,7 +19,15 @@
                                   同步绘制 Canvas 曲线
 ```
 
-### 1.3 Rust 后端支持
+### 1.3 音频管线位置
+```
+麦克风采集 → 重采样 → 降噪 → 强度混合 → 麦克风增益 → 【EQ 均衡器】→ 爆炸模式 → BGM 混音 → 软限制 → 输出
+```
+- EQ 在降噪**之后**、增益**之后**、爆炸模式**之前**
+- 降噪处理原始信号，EQ 调整降噪后的音色，互不干扰
+- 增益放在 EQ 之前，确保 EQ boost 不会导致削波
+
+### 1.4 Rust 后端支持
 - 当前：10 段 Peaking EQ（biquad IIR 滤波器）
 - 未来扩展：High Pass / Low Pass / Low Shelving / High Shelving / Notch Filter
 - 每个频段参数：增益(dB) + 频率(Hz) + Q 值
