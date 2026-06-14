@@ -1,5 +1,6 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use crate::denoise::{self, FRAME_SIZE};
+use crate::eq::{EqConfig, EqProcessor};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -69,6 +70,7 @@ pub struct AudioStats {
 pub struct AudioEngine {
     running: Arc<AtomicBool>,
     config: Arc<RwLock<DenoiseConfig>>,
+    eq_config: Arc<RwLock<EqConfig>>,
     stats: Arc<RwLock<AudioStats>>,
     bgm_running: Arc<AtomicBool>,
     bgm_config: Arc<RwLock<BgmConfig>>,
@@ -89,6 +91,7 @@ impl AudioEngine {
         Self {
             running: Arc::new(AtomicBool::new(false)),
             config: Arc::new(RwLock::new(DenoiseConfig::default())),
+            eq_config: Arc::new(RwLock::new(EqConfig::default())),
             stats: Arc::new(RwLock::new(AudioStats::default())),
             bgm_running: Arc::new(AtomicBool::new(false)),
             bgm_config: Arc::new(RwLock::new(BgmConfig::default())),
@@ -121,6 +124,7 @@ impl AudioEngine {
 
         let running = self.running.clone();
         let config = self.config.clone();
+        let eq_config = self.eq_config.clone();
         let stats = self.stats.clone();
         let bgm_config = self.bgm_config.clone();
         let bgm_running = self.bgm_running.clone();
@@ -139,6 +143,7 @@ impl AudioEngine {
             if let Err(e) = audio_loop(
                 running,
                 config,
+                eq_config,
                 stats,
                 bgm_running,
                 bgm_config,
@@ -268,6 +273,16 @@ impl AudioEngine {
     /// 设置监听模式
     pub fn set_monitor_enabled(&self, enabled: bool) {
         self.monitor_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 更新 EQ 配置
+    pub fn update_eq_config(&self, eq_config: EqConfig) {
+        *self.eq_config.write() = eq_config;
+    }
+
+    /// 获取 EQ 配置
+    pub fn get_eq_config(&self) -> EqConfig {
+        self.eq_config.read().clone()
     }
 }
 
@@ -870,10 +885,11 @@ fn bgm_process_loop(
     Ok(())
 }
 
-/// 主音频循环：麦克风采集 → 降噪 → 混音（可选 BGM）→ 输出
+/// 主音频循环：麦克风采集 → 降噪 → EQ → 混音（可选 BGM）→ 输出
 fn audio_loop(
     running: Arc<AtomicBool>,
     config: Arc<RwLock<DenoiseConfig>>,
+    eq_config: Arc<RwLock<EqConfig>>,
     stats: Arc<RwLock<AudioStats>>,
     bgm_running: Arc<AtomicBool>,
     bgm_config: Arc<RwLock<BgmConfig>>,
@@ -1034,6 +1050,14 @@ fn audio_loop(
         }
     }
     log::info!("Using denoise model: {}", current_model_name);
+
+    // ====== EQ 处理器初始化 ======
+    let mut eq_processor = EqProcessor::new(48000);
+    let current_eq_config = eq_config.read().clone();
+    if current_eq_config.enabled {
+        eq_processor.apply_config(&current_eq_config);
+        log::info!("EQ enabled with preset bands");
+    }
 
     input_client
         .start_stream()
@@ -1206,6 +1230,17 @@ fn audio_loop(
                     // 应用麦克风增益（在降噪后，避免放大噪音）
                     let mic_gain = current_config.mic_gain;
                     let mixed_samples: Vec<f32> = mixed_samples.iter().map(|s| s * mic_gain).collect();
+
+                    // ============ EQ 均衡器 ============
+                    let current_eq = eq_config.read().clone();
+                    let mixed_samples = if current_eq.enabled {
+                        let mut frame = mixed_samples;
+                        eq_processor.apply_config(&current_eq);
+                        eq_processor.process_frame(&mut frame);
+                        frame
+                    } else {
+                        mixed_samples
+                    };
 
                     // ============ 💥 爆炸模式：方波失真 ============
                     let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {

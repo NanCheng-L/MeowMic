@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { listen, emit } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { useAudioEngine } from './composables/useAudioEngine'
 import { useAudioStats } from './composables/useAudioStats'
 import { useSettings } from './composables/useSettings'
@@ -15,6 +16,7 @@ import StatusBadge from './components/StatusBadge.vue'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import BgmMixer from './components/BgmMixer.vue'
 import ExplodeButton from './components/ExplodeButton.vue'
+import EqControl from './components/EqControl.vue'
 import { check } from '@tauri-apps/plugin-updater'
 
 const { t } = useI18n()
@@ -119,10 +121,12 @@ const selectedPreset = ref('standard')
 const monitorEnabled = ref(false)
 const explodeIntensity = ref(0.75)
 const explodeEnabled = ref(false)
+const eqEnabled = ref(false)
 const hasUpdate = ref(false)
 
 let unlistenToggle: (() => void) | null = null
 let unlistenDevices: (() => void) | null = null
+let unlistenEq: (() => void) | null = null
 let initialized = false
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let restarting = false
@@ -145,6 +149,7 @@ const loadConfig = () => {
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
       if (config.explodeIntensity !== undefined) explodeIntensity.value = config.explodeIntensity
+      if (config.eqEnabled !== undefined) eqEnabled.value = config.eqEnabled
     }
   } catch (e) {
     console.error('Failed to load config:', e)
@@ -163,6 +168,7 @@ const saveConfig = () => {
       selectedPreset: selectedPreset.value,
       monitorEnabled: monitorEnabled.value,
       explodeIntensity: explodeIntensity.value,
+      eqEnabled: eqEnabled.value,
     }))
   } catch (e) {
     console.error('Failed to save config:', e)
@@ -330,6 +336,40 @@ const handleMonitorChange = async (enabled: boolean) => {
   }
 }
 
+const handleEqEnabledChange = async (enabled: boolean) => {
+  eqEnabled.value = enabled
+  saveConfig()
+  try {
+    await invoke('update_eq_config', { enabled })
+    await emit('eq-changed', { enabled })
+  } catch (e) {
+    console.error('Failed to update EQ config:', e)
+  }
+}
+
+const openEq = async () => {
+  const existing = await WebviewWindow.getByLabel('eq')
+  if (existing) {
+    try {
+      await existing.show()
+      await existing.setFocus()
+      return
+    } catch {
+      // 窗口已销毁，重新创建
+    }
+  }
+  const isDev = location.hostname === 'localhost'
+  const baseUrl = isDev ? 'http://localhost:1420' : 'tauri://localhost'
+  new WebviewWindow('eq', {
+    url: `${baseUrl}/eq.html`,
+    title: '均衡器 - MeowMic',
+    width: 640,
+    height: 540,
+    center: true,
+    resizable: true,
+  })
+}
+
 // 全局快捷键触发的降噪切换
 const toggleDenoise = async () => {
   await handleEnabledChange(!denoiseEnabled.value)
@@ -408,6 +448,12 @@ onMounted(async () => {
     toggleDenoise()
   })
 
+  // 监听 EQ 窗口状态变更
+  unlistenEq = await listen<{ enabled: boolean }>('eq-changed', (event) => {
+    eqEnabled.value = event.payload.enabled
+    saveConfig()
+  })
+
   // 监听设备热拔插事件（防抖：快速插拔只触发一次重启）
   unlistenDevices = await listen<{
     input_devices: string[]
@@ -465,6 +511,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenToggle?.()
   unlistenDevices?.()
+  unlistenEq?.()
   if (restartTimer) clearTimeout(restartTimer)
   if (isRunning.value) {
     stopDenoising().catch(console.error)
@@ -533,6 +580,14 @@ onUnmounted(() => {
           @update:preset="handlePresetChange"
           @update:monitor-enabled="handleMonitorChange"
           @update:mic-gain="handleMicGainChange"
+        />
+      </section>
+
+      <section class="section">
+        <EqControl
+          :enabled="eqEnabled"
+          @update:enabled="handleEqEnabledChange"
+          @open-eq="openEq"
         />
       </section>
 

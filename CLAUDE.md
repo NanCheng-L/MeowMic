@@ -26,17 +26,21 @@ cargo check             # 检查 Rust 编译（在 src-tauri/ 下）
 
 ```
 src/                    # Vue 前端
-  components/           # UI 组件（SettingsPage / TutorialPage 等独立窗口组件）
+  components/           # UI 组件（SettingsPage / TutorialPage / EqPage 等独立窗口组件）
   composables/          # Vue 组合式函数（useTheme / useSettings / useAudioEngine 等）
   locales/              # 多语言翻译（zh-CN.ts / en.ts / index.ts）
   main.ts               # 主窗口入口
   settings-main.ts      # 设置窗口入口（必须导入 main.css）
   tutorial-main.ts      # 教程窗口入口
+  eq-main.ts            # 均衡器窗口入口
 src-tauri/src/          # Rust 后端
   audio_engine.rs       # WASAPI 音频引擎
   denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs）
+  eq.rs                 # EQ 均衡器（Biquad IIR 滤波器 + 10 段 Peaking EQ）
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
   lib.rs                # Tauri 命令注册 + 系统托盘 + 设置管理
+docs/                   # 文档
+  eq-spec.md            # 均衡器功能规格（参考 SteelSeries GG Sonar）
 scripts/                # 构建/发布辅助脚本
   generate-update-json.cjs # 生成更新所需的 latest.json（输出到安装包同目录，自动读取 .sig）
   set-signing-env.ps1      # 设置签名环境变量（构建前运行）
@@ -56,7 +60,7 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI 线程管理**：`stop()` 必须 `join()` 等音频线程退出再返回，否则旧流残留会产生回音。BGM 线程同理
 - **Tauri 字段命名**：Rust 端 `AppSettings` 用 snake\_case 字段名 + `#[serde(rename_all = "camelCase")]`，前端用 camelCase，Tauri 通过 serde 做转换
 - **设备热拔插**：`wasapi` crate 不支持 `IMMNotificationClient`，用后台轮询枚举设备列表 + 哈希比对实现
-- **多语言**：使用 vue-i18n，语言偏好存 localStorage，选择后即时切换（不需要点保存），主窗口和教程窗口通过 setInterval 轮询同步
+- **多语言**：使用 vue-i18n，语言偏好存 localStorage `meowmic-lang`，选择后即时切换（不需要点保存）。每个独立窗口（主窗口/教程/设置/均衡器）必须：① onMounted 时读取 localStorage 调用 setLocale()；② setInterval 轮询同步；③ storage 事件监听跨窗口同步。详细规范见 `docs/eq-spec.md` §6.4
 - **nnnoiseless DenoiseState**：`new()` 返回 `Box<DenoiseState<'static>>`，结构体有 phantom lifetime 参数 `'a`，字段类型需用 `Box<DenoiseState<'static>>`
 - **前端引擎重启竞争**：设备切换、热拔插、模型切换都会触发 stop+start，多条路径并发调用导致 "Engine is already running"。必须用统一的 debounce restart 函数 + 锁；Vite HMR 重载时前端 ref 重置但 Rust 引擎仍在跑，`handleStart` 需捕获 `already running` 并同步状态
 - **deep\_filter crate lib 名**：Cargo.toml 包名是 `deep_filter`，但 `[lib] name = "df"`，代码中必须 `use df::DFState`，不能 `use deep_filter::DFState`

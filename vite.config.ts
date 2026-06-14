@@ -36,6 +36,7 @@ export default defineConfig(async () => ({
         main: resolve(__dirname, "index.html"),
         tutorial: resolve(__dirname, "tutorial.html"),
         settings: resolve(__dirname, "settings.html"),
+        eq: resolve(__dirname, "eq.html"),
       },
     },
   },

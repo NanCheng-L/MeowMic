@@ -1,8 +1,10 @@
 mod audio_engine;
 mod denoise;
 mod device_watcher;
+mod eq;
 
 use audio_engine::{AudioEngine, AudioStats};
+use eq::{EqConfig, EQ_FREQUENCIES, EQ_PRESET_NAMES};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -347,6 +349,50 @@ fn set_monitor_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), 
 }
 
 #[tauri::command]
+fn update_eq_config(
+    state: State<'_, EngineState>,
+    enabled: Option<bool>,
+    bands: Option<Vec<f32>>,
+) -> Result<(), String> {
+    let engine = state.engine.lock();
+    let mut config = engine.get_eq_config();
+    if let Some(e) = enabled {
+        config.enabled = e;
+    }
+    if let Some(b) = bands {
+        let mut arr = [0.0f32; 10];
+        for (i, &v) in b.iter().enumerate().take(10) {
+            arr[i] = v.clamp(-12.0, 12.0);
+        }
+        config.bands = arr;
+    }
+    engine.update_eq_config(config);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_eq_config(state: State<'_, EngineState>) -> EqConfig {
+    let engine = state.engine.lock();
+    engine.get_eq_config()
+}
+
+#[tauri::command]
+fn get_eq_presets() -> Vec<(String, Vec<f32>)> {
+    EQ_PRESET_NAMES
+        .iter()
+        .map(|name| {
+            let bands = eq::get_preset(name).to_vec();
+            (name.to_string(), bands)
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_eq_frequencies() -> Vec<f32> {
+    EQ_FREQUENCIES.to_vec()
+}
+
+#[tauri::command]
 fn list_denoise_models() -> Vec<&'static str> {
     denoise::list_models()
 }
@@ -389,6 +435,10 @@ pub fn run() {
             update_bgm_config,
             set_explode_mode,
             set_monitor_mode,
+            update_eq_config,
+            get_eq_config,
+            get_eq_presets,
+            get_eq_frequencies,
             list_denoise_models,
             install_vb_cable,
         ])
