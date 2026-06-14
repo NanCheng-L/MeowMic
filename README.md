@@ -64,34 +64,30 @@
 ### 音频处理管线
 
 ```
-麦克风采集 → 重采样(48kHz) → 降噪(RNNoise) → 强度混合 → 麦克风增益 → EQ均衡器 → 爆炸模式 → BGM混音 → 软限制 → 输出(VB-Cable)
-                                                                                    ↑
-                                                                            音乐播放器进程
-                                                                            (WASAPI Loopback)
+麦克风采集 → 重采样 → 降噪 → 强度混合 → 增益 → [EQ] → 炸麦 → BGM混音 → 软限制 → 输出
+                                                       ↑
+                                               音乐播放器进程
 ```
 
 ### 多窗口架构
 
 ```
-主窗口 (main)          设置窗口 (settings)     教程窗口 (tutorial)     EQ窗口 (eq)
-├─ DeviceSelector      ├─ 快捷键配置           ├─ 设备说明             ├─ Canvas曲线图
-├─ DenoiseControl      ├─ 开机自启             ├─ FAQ                  ├─ 可拖拽圆点
-├─ BgmMixer            ├─ 语言切换             ├─ 社交链接             ├─ 预设切换
-├─ EqControl           ├─ 主题切换                                     ├─ 悬停提示框
-├─ ExplodeButton       ├─ 检查更新
-├─ AudioMeter
-└─ SpectrumVisualizer
+主窗口 (main)
+  ├── DeviceSelector (设备选择)
+  ├── DenoiseControl (降噪控制)
+  ├── BgmMixer (BGM混音)
+  ├── EqControl (均衡器开关)
+  ├── ExplodeButton (炸麦)
+  └── AudioMeter (电平表)
 
-         └──────────────────────┬──────────────────────────┘
-                                │
-                       Tauri IPC (invoke/listen)
-                                │
-                       ┌────────┴────────┐
-                       │   Rust Backend  │
-                       │  audio_engine   │
-                       │  eq.rs          │
-                       │  device_watcher │
-                       └─────────────────┘
+设置窗口 (settings)        教程窗口 (tutorial)       EQ窗口 (eq)
+  ├── 快捷键配置             ├── 设备说明              ├── Canvas曲线图
+  ├── 开机自启               ├── FAQ                   ├── 可拖拽圆点
+  ├── 语言切换               └── 社交链接              ├── 预设切换
+  ├── 主题切换                                       └── 悬停提示框
+  └── 检查更新
+
+所有窗口通过 Tauri IPC (invoke/listen) 与 Rust 后端通信
 ```
 
 ## 为什么选 MeowMic
