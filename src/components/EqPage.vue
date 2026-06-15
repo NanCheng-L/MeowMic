@@ -41,17 +41,29 @@ let canvasH = 0
 let draggingBand = -1
 let hoverBand = -1
 
-// 悬停提示框
+// 悬停/弹窗（统一）
 const hoverVisible = ref(false)
 const hoverBandIdx = ref(0)
-const hoverX = ref(0)
-const hoverY = ref(0)
+const popupPinned = ref(false)
+function getPopupPos() {
+  const idx = hoverBandIdx.value
+  const nodeX = freqToX(frequencies.value[idx])
+  const nodeY = dbToY(bands.value[idx])
+  const canvas = canvasRef.value
+  const rect = canvas ? canvas.getBoundingClientRect() : { left: 0, top: 0 }
+  const gap = 80
+  let left = rect.left + nodeX
+  let top = rect.top + nodeY - gap
+  // 弹窗宽度估算：内容撑开后修正（弹窗 min-width 160，实际约 200）
+  const estW = 200
+  if (left + estW / 2 > window.innerWidth) left = window.innerWidth - estW / 2 - 8
+  if (left - estW / 2 < 0) left = estW / 2 + 8
+  if (top < 0) top = rect.top + nodeY + gap
+  return { left: left + 'px', top: top + 'px', transform: 'translateX(-50%)' }
+}
 
-// 弹窗相关
-const popupVisible = ref(false)
-const popupBand = ref(0)
-const popupX = ref(0)
-const popupY = ref(0)
+// popupPinned 取消时清计时器
+watch(popupPinned, (val) => { if (!val) clearTimeout(pinTimer!) })
 
 // 频率响应计算参数
 const SAMPLE_RATE = 48000
@@ -408,12 +420,28 @@ function getCanvasPos(e: MouseEvent): { x: number; y: number } {
   return { x: e.clientX - rect.left, y: e.clientY - rect.top }
 }
 
+let dragMoved = false
+let pinTimer: ReturnType<typeof setTimeout> | null = null
+
+function startPinTimer() {
+  clearTimeout(pinTimer!)
+  pinTimer = setTimeout(() => {
+    popupPinned.value = false
+    hoverVisible.value = false
+  }, 5000)
+}
+
 const handleMouseDown = (e: MouseEvent) => {
+  dragMoved = false
   const { x, y } = getCanvasPos(e)
   const band = getBandAtPos(x, y)
   if (band >= 0) {
     draggingBand = band
-    popupVisible.value = false
+    hoverBandIdx.value = band
+    hoverVisible.value = true
+  } else {
+    popupPinned.value = false
+    hoverVisible.value = false
   }
 }
 
@@ -421,6 +449,7 @@ const handleMouseMove = (e: MouseEvent) => {
   const { x, y } = getCanvasPos(e)
 
   if (draggingBand >= 0) {
+    dragMoved = true
     // 垂直拖拽 = 增益
     const newDb = Math.round(yToDb(y) * 2) / 2 // snap to 0.5
     bands.value[draggingBand] = newDb
@@ -432,25 +461,26 @@ const handleMouseMove = (e: MouseEvent) => {
     activePreset.value = 'custom'
     localStorage.setItem('meowmic-eq-preset', 'custom')
     syncToBackend()
-    // 更新悬停提示框位置
     hoverBandIdx.value = draggingBand
-    hoverX.value = e.clientX
-    hoverY.value = e.clientY
     hoverVisible.value = true
     draw()
     return
   }
 
+  // 弹窗固定时只更新光标，不关闭弹窗
   const band = getBandAtPos(x, y)
+  if (canvasRef.value) {
+    canvasRef.value.style.cursor = band >= 0 ? 'move' : 'default'
+  }
+  if (popupPinned.value) return
+
   if (band !== hoverBand) {
     hoverBand = band
     if (band >= 0) {
       hoverBandIdx.value = band
-      hoverX.value = e.clientX
-      hoverY.value = e.clientY
       hoverVisible.value = true
       if (canvasRef.value) {
-        canvasRef.value.style.cursor = 'grab'
+        canvasRef.value.style.cursor = 'move'
       }
     } else {
       hoverVisible.value = false
@@ -459,57 +489,50 @@ const handleMouseMove = (e: MouseEvent) => {
       }
     }
     draw()
-  } else if (band >= 0) {
-    // 同一个圆点上移动，更新位置
-    hoverX.value = e.clientX
-    hoverY.value = e.clientY
   }
 }
 
 const handleMouseUp = () => {
   if (draggingBand >= 0) {
-    if (canvasRef.value) {
-      canvasRef.value.style.cursor = 'grab'
-    }
     draggingBand = -1
+    // 拖拽结束后固定弹窗 5 秒
+    popupPinned.value = true
+    startPinTimer()
+    draw()
+  }
+}
+
+const handleClick = (e: MouseEvent) => {
+  if (dragMoved) return
+  const { x, y } = getCanvasPos(e)
+  const band = getBandAtPos(x, y)
+  if (band >= 0) {
+    if (popupPinned.value && hoverBandIdx.value === band) {
+      popupPinned.value = false
+    } else {
+      hoverBandIdx.value = band
+      hoverVisible.value = true
+      popupPinned.value = true
+      startPinTimer()
+    }
+  } else {
+    popupPinned.value = false
   }
 }
 
 const handleMouseLeave = () => {
-  hoverVisible.value = false
   hoverBand = -1
   if (draggingBand >= 0) {
     draggingBand = -1
   }
+  // 弹窗可见时不隐藏，让弹窗自己的 mouseleave 处理
   draw()
 }
 
-const handleDoubleClick = (e: MouseEvent) => {
-  const { x, y } = getCanvasPos(e)
-  const band = getBandAtPos(x, y)
-  if (band >= 0) {
-    popupBand.value = band
-    popupX.value = e.clientX
-    popupY.value = e.clientY
-    popupVisible.value = true
+const handlePopupMouseLeave = () => {
+  if (!popupPinned.value) {
+    hoverVisible.value = false
   }
-}
-
-const handlePopupClose = () => {
-  popupVisible.value = false
-}
-
-const handleGainInput = (val: number) => {
-  bands.value[popupBand.value] = Math.round(val * 2) / 2
-  syncToBackend()
-  draw()
-}
-
-const handleFreqInput = (val: number) => {
-  const freq = Math.max(20, Math.min(20000, val))
-  frequencies.value[popupBand.value] = freq
-  syncToBackend()
-  draw()
 }
 
 // ============ 生命周期 ============
@@ -566,6 +589,7 @@ const handleStorage = (e: StorageEvent) => {
 }
 
 onUnmounted(() => {
+  clearTimeout(pinTimer!)
   window.removeEventListener('storage', handleStorage)
   resizeObserver?.disconnect()
   unlisten?.()
@@ -580,7 +604,7 @@ const formatFreq = (hz: number) => {
 </script>
 
 <template>
-  <div class="eq-page" @click="handlePopupClose">
+  <div class="eq-page" @click="popupPinned = false">
     <div class="eq-header">
       <h1>{{ t('eq.title') }}</h1>
       <button class="toggle" :class="{ active: enabled }" @click.stop="handleToggle">
@@ -612,54 +636,22 @@ const formatFreq = (hz: number) => {
           @mousemove.stop="handleMouseMove"
           @mouseup.stop="handleMouseUp"
           @mouseleave.stop="handleMouseLeave"
-          @dblclick.stop="handleDoubleClick"
+          @click.stop="handleClick"
         ></canvas>
       </div>
 
-      <!-- 悬停提示框 -->
+      <!-- 统一弹窗：只读显示，点击固定 -->
       <div
-        v-if="hoverVisible && !popupVisible"
-        class="eq-hover-tooltip"
-        :style="{ left: (hoverX + 12) + 'px', top: (hoverY - 40) + 'px' }"
-      >
-        <span class="hover-dot" :style="{ background: BAND_COLORS[hoverBandIdx] }"></span>
-        <span class="hover-db">{{ bands[hoverBandIdx] > 0 ? '+' : '' }}{{ bands[hoverBandIdx].toFixed(1) }} dB</span>
-        <span class="hover-freq">{{ formatFreq(frequencies[hoverBandIdx]) }}</span>
-      </div>
-
-      <!-- 详情弹窗 -->
-      <div
-        v-if="popupVisible"
+        v-if="hoverVisible"
         class="eq-popup"
-        :style="{ left: popupX + 'px', top: popupY + 'px' }"
+        :style="getPopupPos()"
         @click.stop
+        @mouseleave="handlePopupMouseLeave"
       >
         <div class="popup-row">
-          <span class="popup-dot" :style="{ background: BAND_COLORS[popupBand] }"></span>
-          <div class="popup-input-group">
-            <input
-              type="number"
-              class="popup-input"
-              :value="bands[popupBand]"
-              @change="(e) => handleGainInput(Number((e.target as HTMLInputElement).value))"
-              min="-12"
-              max="12"
-              step="0.5"
-            />
-            <span class="popup-unit">dB</span>
-          </div>
-          <div class="popup-input-group">
-            <input
-              type="number"
-              class="popup-input popup-input-freq"
-              :value="frequencies[popupBand]"
-              @change="(e) => handleFreqInput(Number((e.target as HTMLInputElement).value))"
-              min="20"
-              max="20000"
-              step="1"
-            />
-            <span class="popup-unit">Hz</span>
-          </div>
+          <span class="popup-dot" :style="{ background: BAND_COLORS[hoverBandIdx] }"></span>
+          <span class="hover-db">{{ bands[hoverBandIdx] > 0 ? '+' : '' }}{{ bands[hoverBandIdx].toFixed(1) }} dB</span>
+          <span class="hover-freq">{{ formatFreq(frequencies[hoverBandIdx]) }}</span>
         </div>
       </div>
     </div>
@@ -772,29 +764,7 @@ html, body {
   display: block;
 }
 
-/* 悬停提示框 */
-.eq-hover-tooltip {
-  position: fixed;
-  z-index: 90;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  pointer-events: none;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  white-space: nowrap;
-}
-
-.hover-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
+/* 弹窗文字（只读模式） */
 .hover-db {
   font-size: 13px;
   font-weight: 600;
@@ -818,6 +788,19 @@ html, body {
   padding: 12px;
   min-width: 160px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.eq-popup::after {
+  content: '';
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 12px;
+  height: 12px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  transform: translateX(-50%) rotate(45deg);
 }
 
 .popup-header {
@@ -852,40 +835,6 @@ html, body {
 .popup-row label {
   font-size: 12px;
   color: var(--text-muted);
-}
-
-.popup-input-group {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.popup-input {
-  width: 50px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 6px;
-  font-size: 12px;
-  color: var(--text-primary);
-  font-family: 'DM Mono', monospace;
-  text-align: right;
-  outline: none;
-}
-
-.popup-input:focus {
-  border-color: var(--accent);
-}
-
-.popup-unit {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.popup-value {
-  font-size: 12px;
-  font-family: 'DM Mono', monospace;
-  color: var(--text-primary);
 }
 
 /* Toggle */

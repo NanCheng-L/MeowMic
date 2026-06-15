@@ -965,9 +965,10 @@ fn audio_loop(
     });
     let output_sample_rate = output_format.get_samplespersec();
     let output_channels = output_format.get_nchannels() as usize;
-    log::info!("Output device format: {}Hz, {}ch, {}bit",
-        output_sample_rate, output_channels,
-        output_format.get_bitspersample()
+    let output_bits = output_format.get_bitspersample();
+    let output_sample_type = output_format.get_subformat().unwrap_or(SampleType::Int);
+    log::info!("Output device format: {}Hz, {}ch, {}bit, {:?}",
+        output_sample_rate, output_channels, output_bits, output_sample_type
     );
 
     let (def_time, _min_time) = output_client
@@ -1202,6 +1203,12 @@ fn audio_loop(
                     let mut output_frame = input_frame;
                     if current_config.enabled {
                         denoise.process_frame(&mut output_frame, &input_frame);
+                        // 防止 denoise 模型输出 NaN/Inf 穿透链路
+                        for s in output_frame.iter_mut() {
+                            if !s.is_finite() {
+                                *s = 0.0;
+                            }
+                        }
                     }
 
                     // Skip first frame (fade-in artifact)
@@ -1229,9 +1236,17 @@ fn audio_loop(
                             output_samples
                         };
 
+                    // ====== 诊断：增益前峰值 ======
+                    let pre_gain_peak = mixed_samples.iter()
+                        .map(|s| s.abs()).fold(0.0f32, f32::max);
+
                     // 应用麦克风增益（在降噪后，避免放大噪音）
                     let mic_gain = current_config.mic_gain;
                     let mixed_samples: Vec<f32> = mixed_samples.iter().map(|s| s * mic_gain).collect();
+
+                    // ====== 诊断：增益后峰值 ======
+                    let post_gain_peak = mixed_samples.iter()
+                        .map(|s| s.abs()).fold(0.0f32, f32::max);
 
                     // ============ EQ 均衡器 ============
                     let current_eq = eq_config.read().clone();
@@ -1243,6 +1258,10 @@ fn audio_loop(
                     } else {
                         mixed_samples
                     };
+
+                    // ====== 诊断：EQ 后峰值 ======
+                    let post_eq_peak = mixed_samples.iter()
+                        .map(|s| s.abs()).fold(0.0f32, f32::max);
 
                     // ============ 💥 爆炸模式：方波失真 ============
                     let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
@@ -1359,19 +1378,39 @@ fn audio_loop(
                         bgm_buf.clear();
                     }
 
+                    // ====== 诊断：BGM 混音后峰值 ======
+                    let post_bgm_peak = final_samples.iter()
+                        .map(|s| s.abs()).fold(0.0f32, f32::max);
+
                     // ============ Soft limiter ============
                     let mut limited_samples = final_samples;
                     if !explode_enabled.load(Ordering::Relaxed) {
                         for sample in limited_samples.iter_mut() {
+                            // 先处理 NaN/Inf
+                            if !sample.is_finite() {
+                                *sample = 0.0;
+                                continue;
+                            }
                             let level = sample.abs();
-                            if level > 28000.0 {
-                                let excess = level - 28000.0;
-                                let compressed = 28000.0 + excess * 0.2;
+                            if level > 24000.0 {
+                                let excess = level - 24000.0;
+                                let compressed = 24000.0 + excess * 0.1;
                                 let sign = if *sample > 0.0 { 1.0 } else { -1.0 };
-                                *sample = sign * compressed.min(32767.0);
+                                *sample = sign * compressed.min(30000.0);
+                            }
+                        }
+                    } else {
+                        // 爆炸模式也要防 NaN/Inf
+                        for sample in limited_samples.iter_mut() {
+                            if !sample.is_finite() {
+                                *sample = 0.0;
                             }
                         }
                     }
+
+                    // ====== 诊断：limiter 后峰值 ======
+                    let output_peak = limited_samples.iter()
+                        .map(|s| s.abs()).fold(0.0f32, f32::max);
 
                     // 6. 重采样回设备采样率
                     let resampled_out = if output_sample_rate != 48000 {
@@ -1383,20 +1422,13 @@ fn audio_loop(
                     // 7. 单声道 → 多声道
                     let stereo_out = upmix_to_stereo(&resampled_out, output_channels);
 
-                    // 8. f32 → 设备格式字节
+                    // 8. f32 → 输出设备格式字节
                     let out_frames = stereo_out.len() / output_channels;
                     let out_bytes = out_frames * output_bytes_per_frame;
+                    output_buffer[..out_bytes].fill(0);
                     for (i, &sample) in stereo_out.iter().enumerate() {
                         let byte_pos = i * (output_bytes_per_frame / output_channels);
-                        match (input_bits, &input_sample_type) {
-                            (16, SampleType::Int) | (16, _) => {
-                                let val = (sample.clamp(-32768.0, 32767.0)) as i16;
-                                let bytes = val.to_le_bytes();
-                                if byte_pos + 1 < output_buffer.len() {
-                                    output_buffer[byte_pos] = bytes[0];
-                                    output_buffer[byte_pos + 1] = bytes[1];
-                                }
-                            }
+                        match (output_bits, &output_sample_type) {
                             (32, SampleType::Float) => {
                                 let val = (sample / 32767.0).clamp(-1.0, 1.0);
                                 let bytes = val.to_le_bytes();
@@ -1434,6 +1466,31 @@ fn audio_loop(
 
                     frame_count += 1;
 
+                    // ====== 诊断日志：每秒摘要 + 异常告警 ======
+                    // 每 480 帧（1秒）输出完整信号链摘要
+                    if frame_count % 480 == 0 {
+                        let input_peak = input_frame.iter()
+                            .map(|s| s.abs()).fold(0.0f32, f32::max);
+                        debug_log(&format!(
+                            "DIAG frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
+                            frame_count, input_peak, pre_gain_peak, post_gain_peak,
+                            post_eq_peak, post_bgm_peak, output_peak,
+                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Relaxed)
+                        ));
+                    }
+                    // 异常告警：任一阶段峰值超过安全阈值，立即记录
+                    let alarm = post_gain_peak > 24000.0 || post_eq_peak > 24000.0
+                        || post_bgm_peak > 24000.0 || output_peak > 24000.0;
+                    if alarm {
+                        debug_log(&format!(
+                            "ALARM frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
+                            frame_count, input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max),
+                            pre_gain_peak, post_gain_peak, post_eq_peak, post_bgm_peak, output_peak,
+                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Relaxed)
+                        ));
+                    }
+
+                    // 延迟测量（每帧更新，供前端显示）
                     if frame_count % 5 == 0 {
                         let input_rms = calculate_rms(&input_frame);
                         let output_rms = calculate_rms(&limited_samples);
@@ -1448,7 +1505,6 @@ fn audio_loop(
                             -100.0
                         };
 
-                        // 延迟测量：输入缓冲 + 输出缓冲的帧数 / 采样率
                         let input_padding = input_client.get_current_padding().unwrap_or(0);
                         let output_padding = output_client.get_current_padding().unwrap_or(0);
                         let input_latency = input_padding as f32 / input_sample_rate as f32 * 1000.0;

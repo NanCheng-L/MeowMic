@@ -93,6 +93,10 @@ scripts/                # 构建/发布辅助脚本
 - **EQ loadEqConfig 加载顺序**：后端 `EqConfig` 在 engine 重启后 bands 恢复为全 0（default）。`loadEqConfig` 必须优先从 `localStorage('meowmic-eq-preset')` 读取预设名，用 `presets.find()` 获取正确的 bands 值，不能直接用后端返回的 bands——否则预设名正确但曲线平坦。同时 `loadPresets()` 必须在 `loadEqConfig()` 之前完成（不能用 `Promise.all`），否则 presets 数组为空
 - **EQ 跨窗口状态同步**：`loadEqConfig` 从 `localStorage('meowmic-config')` 读取 `eqEnabled` 并同步到后端，而非从后端读取（后端不持久化）。同时在 EqPage.vue 中监听 `eq-changed` Tauri 事件实时更新 toggle 状态
 - **WASAPI IAudioSessionManager2**：枚举音频会话需要 `Win32_System_Com` + `Win32_Media_Audio` feature；活跃会话始终显示，非活跃会话仅保留映射表中的已知播放器（避免系统进程如 audiodg 出现）；同名进程按名称去重
+- **WASAPI 输出编码格式**：输出编码必须用**输出设备**的 format（`output_bits` / `output_sample_type`），不能用输入设备的。VB-Audio Cable 通常是 32-bit float，麦克风通常是 16-bit int，混用会导致字节错位产生破音
+- **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`
+- **Soft limiter 阈值与压缩比**：阈值不能太高（28000 太接近 0dBFS），压缩比不能太温和（0.2 即 5:1 仍可能输出 30000+）。推荐阈值 24000、压缩比 0.1（10:1）、硬上限 30000
+- **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏
 
 ## 版本号管理
 
