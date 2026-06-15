@@ -1025,12 +1025,12 @@ fn audio_loop(
             {
                 if let Ok(render) = m_client.get_audiorenderclient() {
                     let evt = m_client.set_get_eventhandle();
-                    if m_client.start_stream().is_ok() {
-                        log::info!("Monitor started on default output: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
-                        monitor_render_opt = Some(render);
-                        monitor_event_opt = evt.ok();
-                        monitor_client_opt = Some(m_client);
-                    }
+                    // 不在这里 start_stream，由主循环按 monitor_enabled 控制启停
+                    // 避免默认输出与输入是同一 USB 设备时无条件开启导致干扰
+                    log::info!("Monitor client ready on default output: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
+                    monitor_render_opt = Some(render);
+                    monitor_event_opt = evt.ok();
+                    monitor_client_opt = Some(m_client);
                 }
             }
         }
@@ -1131,7 +1131,7 @@ fn audio_loop(
 
     // BGM 缓冲：立体声 i16 样本队列
     let mut bgm_buf: Vec<i16> = Vec::new();
-    let mut monitor_was_streaming = monitor_enabled.load(Ordering::Relaxed);
+    let mut monitor_was_streaming = false; // 流未在初始化时启动，由主循环控制
 
     let mut loop_iteration: u64 = 0;
     let mut consecutive_zero_reads: u32 = 0;

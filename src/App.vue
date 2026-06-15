@@ -463,6 +463,7 @@ onMounted(async () => {
     if (!initialized) return
 
     const prevInput = selectedInput.value
+    const prevOutput = selectedOutput.value
 
     inputDevices.value = event.payload.input_devices
     outputDevices.value = event.payload.output_devices
@@ -487,8 +488,14 @@ onMounted(async () => {
       selectedOutput.value = ''
     }
 
-    // debounce restart — 快速插拔只触发一次
-    scheduleRestart(100)
+    // 只在选中的设备实际发生变化时才重启，避免无关设备变化触发无意义重启
+    const inputChanged = selectedInput.value !== prevInput
+    const outputChanged = selectedOutput.value !== prevOutput
+    const inputLost = prevInput && !inputDevices.value.includes(prevInput)
+    const outputLost = prevOutput && !outputDevices.value.includes(prevOutput)
+    if (inputChanged || outputChanged || inputLost || outputLost) {
+      scheduleRestart(100)
+    }
   })
 
   // 轮询检测设置窗口的变更（localStorage 通信，避免跨窗口 emit 问题）
