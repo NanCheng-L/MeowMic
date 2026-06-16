@@ -37,6 +37,15 @@ export default {
     },
     monitor: 'Monitor',
     monitorDesc: 'Hear your own denoised voice through headphones',
+    monitorPoint: 'Monitor Point',
+    monitorPoints: {
+      off: 'Off',
+      raw: 'Raw Input',
+      denoised: 'After Denoise',
+      gain: 'After Gain',
+      eq: 'After EQ',
+      output: 'Final Output',
+    },
     micGain: 'Mic Gain',
   },
   bgm: {
@@ -46,7 +55,7 @@ export default {
     noProcess: 'No music player process detected, please open a music app first',
   },
   eq: {
-    label: 'Equalizer',
+    label: 'Equalizer (EQ)',
     title: 'Equalizer',
     open: 'Adjust',
     preset: 'Preset',
@@ -56,13 +65,22 @@ export default {
     enabled: 'Enabled',
     disabled: 'Disabled',
     presets: {
-      flat: 'Flat',
+      custom: 'Custom',
       clear: 'Clear',
       warm: 'Warm',
       broadcast: 'Broadcast',
       'bass-boost': 'Bass Boost',
       'treble-boost': 'Treble Boost',
       podcast: 'Podcast',
+    },
+    presetDesc: {
+      custom: 'Custom curve from manual adjustments',
+      clear: 'Enhance voice clarity, great for calls',
+      warm: 'Boost mids/lows for fuller, richer sound',
+      broadcast: 'Radio style, prominent mids and deep lows',
+      'bass-boost': 'Boost bass for music enjoyment',
+      'treble-boost': 'Boost treble for detail and airiness',
+      podcast: 'Optimized for podcasts/audiobooks, warm and clear',
     },
     bandLabels: {
       '0': 'Sub',

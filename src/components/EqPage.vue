@@ -26,11 +26,11 @@ const getThemeColors = () => {
 
 const enabled = ref(false)
 const bands = ref<number[]>(new Array(10).fill(0))
-const activePreset = ref('flat')
+const activePreset = ref('custom')
 const frequencies = ref<number[]>([20, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000])
 const presets = ref<[string, number[]][]>([])
 
-const PRESET_KEYS = ['flat', 'clear', 'warm', 'broadcast', 'bass-boost', 'treble-boost', 'podcast'] as const
+const PRESET_KEYS = ['custom', 'clear', 'warm', 'broadcast', 'bass-boost', 'treble-boost', 'podcast'] as const
 
 // Canvas 相关
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -95,22 +95,40 @@ const loadEqConfig = async () => {
 
     // 恢复预设选择，用预设值覆盖 bands
     const savedPreset = localStorage.getItem('meowmic-eq-preset')
-    if (savedPreset && savedPreset !== 'custom') {
+
+    // 自定义预设：从 localStorage 恢复 bands
+    if (savedPreset === 'custom') {
+      const savedBands = localStorage.getItem('meowmic-eq-bands')
+      if (savedBands) {
+        try {
+          bands.value = JSON.parse(savedBands)
+        } catch {
+          bands.value = new Array(10).fill(0)
+        }
+      } else {
+        bands.value = new Array(10).fill(0)
+      }
+      activePreset.value = 'custom'
+      await invoke('update_eq_config', { bands: bands.value })
+      return
+    }
+
+    // 其他预设：从后端加载
+    if (savedPreset) {
       const preset = presets.value.find(([k]) => k === savedPreset)
       if (preset) {
         bands.value = [...preset[1]]
         activePreset.value = savedPreset
-        // 同步到后端
         await invoke('update_eq_config', { bands: bands.value })
         return
       }
     }
 
-    // fallback: 从后端读取
+    // fallback: 从后端读取（默认 custom + 全零）
     const config = await invoke<{ enabled: boolean; bands: number[] }>('get_eq_config')
     enabled.value = config.enabled
     bands.value = [...config.bands]
-    activePreset.value = savedPreset || 'flat'
+    activePreset.value = 'custom'
   } catch (e) {
     console.error('Failed to load EQ config:', e)
   }
@@ -130,12 +148,28 @@ const loadPresets = async () => {
 }
 
 const applyPreset = (name: string) => {
+  // 'custom'：从 localStorage 恢复，不覆盖
+  if (name === 'custom') {
+    const savedBands = localStorage.getItem('meowmic-eq-bands')
+    if (savedBands) {
+      try { bands.value = JSON.parse(savedBands) } catch { bands.value = new Array(10).fill(0) }
+    } else {
+      bands.value = new Array(10).fill(0)
+    }
+    activePreset.value = name
+    localStorage.setItem('meowmic-eq-preset', name)
+    syncToBackend()
+    emit('eq-changed', { enabled: enabled.value, preset: name })
+    draw()
+    return
+  }
   const preset = presets.value.find(([k]) => k === name)
   if (preset) {
     bands.value = [...preset[1]]
     activePreset.value = name
     localStorage.setItem('meowmic-eq-preset', name)
     syncToBackend()
+    emit('eq-changed', { enabled: enabled.value, preset: name })
     draw()
   }
 }
@@ -143,7 +177,7 @@ const applyPreset = (name: string) => {
 const handleToggle = async () => {
   enabled.value = !enabled.value
   syncToBackend()
-  await emit('eq-changed', { enabled: enabled.value })
+  await emit('eq-changed', { enabled: enabled.value, preset: activePreset.value })
   draw()
 }
 
@@ -164,9 +198,11 @@ const syncToBackend = () => {
 
 const handleReset = () => {
   bands.value = new Array(10).fill(0)
-  activePreset.value = 'flat'
-  localStorage.setItem('meowmic-eq-preset', 'flat')
+  activePreset.value = 'custom'
+  localStorage.setItem('meowmic-eq-preset', 'custom')
+  localStorage.setItem('meowmic-eq-bands', JSON.stringify(bands.value))
   syncToBackend()
+  emit('eq-changed', { enabled: enabled.value, preset: 'custom' })
   draw()
 }
 
@@ -460,7 +496,9 @@ const handleMouseMove = (e: MouseEvent) => {
     }
     activePreset.value = 'custom'
     localStorage.setItem('meowmic-eq-preset', 'custom')
+    localStorage.setItem('meowmic-eq-bands', JSON.stringify(bands.value))
     syncToBackend()
+    emit('eq-changed', { enabled: enabled.value, preset: 'custom' })
     hoverBandIdx.value = draggingBand
     hoverVisible.value = true
     draw()
@@ -626,6 +664,7 @@ const formatFreq = (hz: number) => {
             {{ t(`eq.presets.${key}`) }}
           </button>
         </div>
+        <p class="preset-desc">{{ t(`eq.presetDesc.${activePreset}`) }}</p>
       </div>
 
       <div class="canvas-container" ref="containerRef">
@@ -709,21 +748,27 @@ html, body {
 
 .preset-section {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 6px;
   flex-shrink: 0;
 }
 
 .preset-label {
   font-size: 13px;
   color: var(--text-muted);
-  flex-shrink: 0;
 }
 
 .preset-group {
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
+}
+
+.preset-desc {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .preset-btn {

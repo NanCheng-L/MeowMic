@@ -349,6 +349,13 @@ fn set_monitor_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), 
 }
 
 #[tauri::command]
+fn set_monitor_point(state: State<'_, EngineState>, point: u32) -> Result<(), String> {
+    let engine = state.engine.lock();
+    engine.set_monitor_point(point);
+    Ok(())
+}
+
+#[tauri::command]
 fn update_eq_config(
     state: State<'_, EngineState>,
     enabled: Option<bool>,
@@ -435,6 +442,7 @@ pub fn run() {
             update_bgm_config,
             set_explode_mode,
             set_monitor_mode,
+            set_monitor_point,
             update_eq_config,
             get_eq_config,
             get_eq_presets,

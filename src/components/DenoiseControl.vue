@@ -24,6 +24,7 @@ const props = defineProps<{
   preset: string
   loading: boolean
   monitorEnabled: boolean
+  monitorPoint: number
   micGain: number
 }>()
 
@@ -33,6 +34,7 @@ const emit = defineEmits<{
   'update:model': [value: string]
   'update:preset': [value: string]
   'update:monitorEnabled': [value: boolean]
+  'update:monitorPoint': [value: number]
   'update:micGain': [value: number]
 }>()
 
@@ -71,6 +73,14 @@ const strengthLabel = computed(() => {
 const strengthPercent = computed(() => Math.round(props.strength * 100))
 
 const micGainPercent = computed(() => Math.round(props.micGain * 100))
+
+const monitorPointOptions = computed(() => ({
+  1: t('denoise.monitorPoints.raw'),
+  2: t('denoise.monitorPoints.denoised'),
+  3: t('denoise.monitorPoints.gain'),
+  4: t('denoise.monitorPoints.eq'),
+  5: t('denoise.monitorPoints.output'),
+}))
 
 const micGainColor = computed(() => {
   const g = props.micGain
@@ -156,7 +166,21 @@ const handleSliderInput = (e: Event) => {
         <span class="toggle-knob"></span>
       </button>
     </div>
-    <p class="monitor-desc">{{ t('denoise.monitorDesc') }}</p>
+
+    <div class="monitor-points" v-if="monitorEnabled">
+      <span class="monitor-points-label">{{ t('denoise.monitorPoint') }}</span>
+      <div class="monitor-points-group">
+        <button
+          v-for="(label, key) in monitorPointOptions"
+          :key="key"
+          class="monitor-point-btn"
+          :class="{ active: monitorPoint === Number(key) }"
+          @click="emit('update:monitorPoint', Number(key))"
+        >
+          {{ label }}
+        </button>
+      </div>
+    </div>
 
     <p v-if="enabled && model" class="model-desc">{{ t(`denoise.desc.${model}`) }}</p>
 
@@ -565,6 +589,45 @@ const handleSliderInput = (e: Event) => {
   font-size: 11px;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+.monitor-points {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.monitor-points-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.monitor-points-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.monitor-point-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.monitor-point-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.monitor-point-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
 }
 
 .monitor-device-section {

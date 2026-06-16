@@ -7,6 +7,7 @@ import { availableLocales, setLocale } from '../locales'
 import UpdateChecker from './UpdateChecker.vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 
 const { t } = useI18n()
 const { saveSettings, registerHotkey, unregisterHotkey } = useSettings()
@@ -105,6 +106,11 @@ onMounted(async () => {
   if (savedLang) {
     setLocale(savedLang)
   }
+
+  // 先直接加载模型列表（兜底，避免 settings-init 事件丢失）
+  try {
+    availableModels.value = await invoke<string[]>('list_denoise_models')
+  } catch {}
 
   unlistenInit = await listen<any>('settings-init', (event) => {
     const p = event.payload

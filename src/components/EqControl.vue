@@ -1,51 +1,83 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 
-defineProps<{
+const PRESET_KEYS = ['custom', 'clear', 'warm', 'broadcast', 'bass-boost', 'treble-boost', 'podcast'] as const
+
+const props = defineProps<{
   enabled: boolean
+  activePreset: string
 }>()
 
 const emit = defineEmits<{
   'update:enabled': [value: boolean]
+  'update:preset': [value: string]
   'open-eq': []
 }>()
+
+const presetDesc = computed(() => {
+  const key = props.activePreset as typeof PRESET_KEYS[number]
+  return t(`eq.presetDesc.${key}`)
+})
 </script>
 
 <template>
   <div class="eq-control">
-    <div class="eq-left">
-      <svg class="eq-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <line x1="4" y1="21" x2="4" y2="14"/>
-        <line x1="4" y1="10" x2="4" y2="3"/>
-        <line x1="12" y1="21" x2="12" y2="12"/>
-        <line x1="12" y1="8" x2="12" y2="3"/>
-        <line x1="20" y1="21" x2="20" y2="16"/>
-        <line x1="20" y1="12" x2="20" y2="3"/>
-        <line x1="1" y1="14" x2="7" y2="14"/>
-        <line x1="9" y1="8" x2="15" y2="8"/>
-        <line x1="17" y1="16" x2="23" y2="16"/>
-      </svg>
-      <span class="eq-label">{{ t('eq.label') }}</span>
+    <div class="eq-header">
+      <div class="eq-left">
+        <svg class="eq-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="4" y1="21" x2="4" y2="14"/>
+          <line x1="4" y1="10" x2="4" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12" y2="3"/>
+          <line x1="20" y1="21" x2="20" y2="16"/>
+          <line x1="20" y1="12" x2="20" y2="3"/>
+          <line x1="1" y1="14" x2="7" y2="14"/>
+          <line x1="9" y1="8" x2="15" y2="8"/>
+          <line x1="17" y1="16" x2="23" y2="16"/>
+        </svg>
+        <span class="eq-label">{{ t('eq.label') }}</span>
+      </div>
+      <div class="eq-right">
+        <button class="eq-open-btn" @click="emit('open-eq')">
+          {{ t('eq.open') }}
+        </button>
+        <button
+          class="toggle"
+          :class="{ active: enabled }"
+          @click="emit('update:enabled', !enabled)"
+        >
+          <span class="toggle-knob"></span>
+        </button>
+      </div>
     </div>
-    <div class="eq-right">
-      <button class="eq-open-btn" @click="emit('open-eq')">
-        {{ t('eq.open') }}
-      </button>
+
+    <div class="eq-presets">
       <button
-        class="toggle"
-        :class="{ active: enabled }"
-        @click="emit('update:enabled', !enabled)"
+        v-for="key in PRESET_KEYS"
+        :key="key"
+        class="eq-preset-btn"
+        :class="{ active: activePreset === key }"
+        @click="emit('update:preset', key)"
       >
-        <span class="toggle-knob"></span>
+        {{ t(`eq.presets.${key}`) }}
       </button>
     </div>
+
+    <p v-if="enabled" class="eq-preset-desc">{{ presetDesc }}</p>
   </div>
 </template>
 
 <style scoped>
 .eq-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.eq-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -117,5 +149,40 @@ const emit = defineEmits<{
 
 .toggle.active .toggle-knob {
   transform: translateX(22px);
+}
+
+.eq-presets {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.eq-preset-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.eq-preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.eq-preset-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.eq-preset-desc {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 </style>

@@ -21,7 +21,7 @@ import { check } from '@tauri-apps/plugin-updater'
 
 const { t } = useI18n()
 
-const { startDenoising, stopDenoising, updateConfig, listInputDevices, listOutputDevices, listDenoiseModels, setMonitorMode } = useAudioEngine()
+const { startDenoising, stopDenoising, updateConfig, listInputDevices, listOutputDevices, listDenoiseModels, setMonitorMode, setMonitorPoint } = useAudioEngine()
 const { stats, startPolling, stopPolling } = useAudioStats()
 const { settings, loadSettings } = useSettings()
 const { theme } = useTheme()
@@ -119,9 +119,11 @@ const selectedModel = ref('RNNoise')
 const availableModels = ref<string[]>([])
 const selectedPreset = ref('standard')
 const monitorEnabled = ref(false)
+const monitorPoint = ref(5) // 默认监听最终输出
 const explodeIntensity = ref(0.75)
 const explodeEnabled = ref(false)
 const eqEnabled = ref(false)
+const eqActivePreset = ref('custom')
 const hasUpdate = ref(false)
 
 let unlistenToggle: (() => void) | null = null
@@ -148,9 +150,13 @@ const loadConfig = () => {
       if (config.selectedModel) selectedModel.value = config.selectedModel
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
+      if (config.monitorPoint !== undefined) monitorPoint.value = config.monitorPoint
       if (config.explodeIntensity !== undefined) explodeIntensity.value = config.explodeIntensity
       if (config.eqEnabled !== undefined) eqEnabled.value = config.eqEnabled
     }
+    // EQ 预设单独存储
+    const savedPreset = localStorage.getItem('meowmic-eq-preset')
+    if (savedPreset) eqActivePreset.value = savedPreset
   } catch (e) {
     console.error('Failed to load config:', e)
   }
@@ -167,6 +173,7 @@ const saveConfig = () => {
       selectedModel: selectedModel.value,
       selectedPreset: selectedPreset.value,
       monitorEnabled: monitorEnabled.value,
+      monitorPoint: monitorPoint.value,
       explodeIntensity: explodeIntensity.value,
       eqEnabled: eqEnabled.value,
     }))
@@ -226,6 +233,10 @@ const handleStart = async () => {
     isRunning.value = true
     // 启动后同步降噪开关状态到后端
     await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
+    // 同步监听点到后端
+    if (monitorPoint.value > 0) {
+      await setMonitorPoint(monitorPoint.value)
+    }
     startPolling()
   } catch (e) {
     const msg = String(e)
@@ -234,6 +245,9 @@ const handleStart = async () => {
       console.warn('Engine already running, syncing state')
       isRunning.value = true
       await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
+      if (monitorPoint.value > 0) {
+        await setMonitorPoint(monitorPoint.value)
+      }
       startPolling()
     } else if (msg.includes('AUDIO_DEVICE_CONFLICT')) {
       // 输入输出是同一设备导致的死锁
@@ -336,6 +350,16 @@ const handleMonitorChange = async (enabled: boolean) => {
   }
 }
 
+const handleMonitorPointChange = async (point: number) => {
+  monitorPoint.value = point
+  saveConfig()
+  try {
+    await setMonitorPoint(point)
+  } catch (e) {
+    console.error('Failed to set monitor point:', e)
+  }
+}
+
 const handleEqEnabledChange = async (enabled: boolean) => {
   eqEnabled.value = enabled
   saveConfig()
@@ -344,6 +368,32 @@ const handleEqEnabledChange = async (enabled: boolean) => {
     await emit('eq-changed', { enabled })
   } catch (e) {
     console.error('Failed to update EQ config:', e)
+  }
+}
+
+const handleEqPresetChange = async (preset: string) => {
+  eqActivePreset.value = preset
+  localStorage.setItem('meowmic-eq-preset', preset)
+
+  // 自定义：从 localStorage 加载 bands（不覆盖）
+  if (preset === 'custom') {
+    const savedBands = localStorage.getItem('meowmic-eq-bands')
+    const bands = savedBands ? JSON.parse(savedBands) : new Array(10).fill(0)
+    await invoke('update_eq_config', { bands })
+    await emit('eq-changed', { enabled: eqEnabled.value })
+    return
+  }
+
+  // 其他预设：从后端获取 bands 值
+  try {
+    const presets = await invoke<[string, number[]][]>('get_eq_presets')
+    const found = presets.find(([k]) => k === preset)
+    if (found) {
+      await invoke('update_eq_config', { bands: found[1] })
+      await emit('eq-changed', { enabled: eqEnabled.value })
+    }
+  } catch (e) {
+    console.error('Failed to apply EQ preset:', e)
   }
 }
 
@@ -449,8 +499,12 @@ onMounted(async () => {
   })
 
   // 监听 EQ 窗口状态变更
-  unlistenEq = await listen<{ enabled: boolean }>('eq-changed', (event) => {
+  unlistenEq = await listen<{ enabled: boolean; preset?: string }>('eq-changed', (event) => {
     eqEnabled.value = event.payload.enabled
+    if (event.payload.preset) {
+      eqActivePreset.value = event.payload.preset
+      localStorage.setItem('meowmic-eq-preset', event.payload.preset)
+    }
     saveConfig()
   })
 
@@ -580,12 +634,14 @@ onUnmounted(() => {
           :preset="selectedPreset"
           :loading="isLoading"
           :monitor-enabled="monitorEnabled"
+          :monitor-point="monitorPoint"
           :mic-gain="micGain"
           @update:enabled="handleEnabledChange"
           @update:strength="handleStrengthChange"
           @update:model="handleModelChange"
           @update:preset="handlePresetChange"
           @update:monitor-enabled="handleMonitorChange"
+          @update:monitor-point="handleMonitorPointChange"
           @update:mic-gain="handleMicGainChange"
         />
       </section>
@@ -593,7 +649,9 @@ onUnmounted(() => {
       <section class="section">
         <EqControl
           :enabled="eqEnabled"
+          :active-preset="eqActivePreset"
           @update:enabled="handleEqEnabledChange"
+          @update:preset="handleEqPresetChange"
           @open-eq="openEq"
         />
       </section>

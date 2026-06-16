@@ -37,6 +37,15 @@ export default {
     },
     monitor: '监听',
     monitorDesc: '开启后可通过耳机听到自己降噪后的声音',
+    monitorPoint: '监听点',
+    monitorPoints: {
+      off: '关闭',
+      raw: '原始输入',
+      denoised: '降噪后',
+      gain: '增益后',
+      eq: 'EQ后',
+      output: '最终输出',
+    },
     micGain: '麦克风增益',
   },
   bgm: {
@@ -46,7 +55,7 @@ export default {
     noProcess: '未检测到音乐播放器进程，请先打开音乐软件',
   },
   eq: {
-    label: '均衡器',
+    label: '均衡器 (EQ)',
     title: '均衡器',
     open: '调整',
     preset: '预设',
@@ -56,13 +65,22 @@ export default {
     enabled: '已启用',
     disabled: '已关闭',
     presets: {
-      flat: '平坦',
+      custom: '自定义',
       clear: '清晰',
       warm: '温暖',
       broadcast: '广播',
       'bass-boost': '低音增强',
       'treble-boost': '高音增强',
       podcast: '播客',
+    },
+    presetDesc: {
+      custom: '手动调节后的自定义曲线',
+      clear: '增强人声清晰度，适合语音通话',
+      warm: '提升中低频，声音更饱满厚实',
+      broadcast: '电台风格，中频突出、低频浑厚',
+      'bass-boost': '增强低音，适合音乐欣赏',
+      'treble-boost': '增强高音，提升细节和空气感',
+      podcast: '播客/有声书优化，人声温暖清晰',
     },
     bandLabels: {
       '0': '次低频',

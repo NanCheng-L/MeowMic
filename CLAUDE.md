@@ -97,6 +97,10 @@ scripts/                # 构建/发布辅助脚本
 - **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`
 - **Soft limiter 阈值与压缩比**：阈值不能太高（28000 太接近 0dBFS），压缩比不能太温和（0.2 即 5:1 仍可能输出 30000+）。推荐阈值 24000、压缩比 0.1（10:1）、硬上限 30000
 - **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏
+- **WASAPI 监听同设备检测**：监听使用系统默认输出设备（`find_device(None, false)`），可能与输入是同一 USB 物理设备（如 K7 麦克风 + K7 耳机）。通过提取设备 ID 中的 USB VID/PID 比较，相同则跳过监听初始化，避免共享 USB 时钟导致的电流麦干扰
+- **监听点启动同步**：`monitor_point` 后端默认为 0（关闭），前端 localStorage 保存的值需在引擎启动后调用 `setMonitor_point` 同步，否则监听不生效。需在 `handleStart` 和 HMR 热重载恢复路径中都同步
+- **监听点必须在处理阶段之前**：监听点写入必须放在对应处理阶段**之前**（如点 2 在增益前、点 3 在增益后），否则所有点读到的是同一个变量（已被后续阶段覆盖）。常见错误：把所有监听点放在处理链路末尾
+- **设置窗口模型列表兜底**：设置窗口首次打开时，`settings-init` 事件可能因窗口未加载完而丢失。需在 `onMounted` 中直接调用 `list_denoise_models` 兜底加载
 
 ## 版本号管理
 

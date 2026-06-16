@@ -67,6 +67,10 @@ pub struct AudioStats {
     pub spectrum: Vec<f32>,
 }
 
+/// 监听点：在音频链路的哪个阶段输出到监听设备
+/// 0=关闭, 1=原始输入, 2=降噪后, 3=增益后, 4=EQ后, 5=最终输出
+pub type MonitorPoint = u32;
+
 pub struct AudioEngine {
     running: Arc<AtomicBool>,
     config: Arc<RwLock<DenoiseConfig>>,
@@ -79,6 +83,7 @@ pub struct AudioEngine {
     explode_enabled: Arc<AtomicBool>,
     explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
+    monitor_point: Arc<AtomicU32>,
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     bgm_thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 模型内部状态（归一化统计等），按模型名分别保存
@@ -100,6 +105,7 @@ impl AudioEngine {
             explode_enabled: Arc::new(AtomicBool::new(false)),
             explode_intensity: Arc::new(AtomicU32::new(50)),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
+            monitor_point: Arc::new(AtomicU32::new(0)),
             thread_handle: std::sync::Mutex::new(None),
             bgm_thread_handle: std::sync::Mutex::new(None),
             model_states: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -132,6 +138,7 @@ impl AudioEngine {
         let explode_enabled = self.explode_enabled.clone();
         let explode_intensity = self.explode_intensity.clone();
         let monitor_enabled = self.monitor_enabled.clone();
+        let monitor_point = self.monitor_point.clone();
         let model_states = self.model_states.clone();
 
         // 同步初始监听状态
@@ -155,6 +162,7 @@ impl AudioEngine {
                 explode_enabled,
                 explode_intensity,
                 monitor_enabled,
+                monitor_point,
                 model_states,
             ) {
                 log::error!("Audio engine error: {}", e);
@@ -273,6 +281,11 @@ impl AudioEngine {
     /// 设置监听模式
     pub fn set_monitor_enabled(&self, enabled: bool) {
         self.monitor_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 设置监听点（0=关闭, 1=原始输入, 2=降噪后, 3=增益后, 4=EQ后, 5=最终输出）
+    pub fn set_monitor_point(&self, point: MonitorPoint) {
+        self.monitor_point.store(point, Ordering::Relaxed);
     }
 
     /// 更新 EQ 配置
@@ -901,6 +914,7 @@ fn audio_loop(
     explode_enabled: Arc<AtomicBool>,
     explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
+    monitor_point: Arc<AtomicU32>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
@@ -1011,9 +1025,35 @@ fn audio_loop(
     let mut monitor_buffer = vec![0u8; monitor_max_frames * 2 * 2]; // stereo i16
 
     // 监听使用系统默认输出设备（和 OBS 一样），不需要用户手动选择
+    // 但如果默认输出与输入是同一 USB 设备，则跳过（会导致同设备冲突）
     if let Ok(monitor_output) = find_device(None, false) {
         let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
-        if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
+        let monitor_output_id = monitor_output.get_id().unwrap_or_default();
+        let input_device_id = input_device.get_id().unwrap_or_default();
+
+        // 检测同设备：USB 设备 ID 包含 VID/PID，同一物理设备的输入输出共享
+        // 例如: \\?\usb#vid_1234&pid_5678&... 和 \\?\usb#vid_1234&pid_5678&...
+        let extract_usb_id = |id: &str| -> String {
+            if let Some(start) = id.find("vid_") {
+                let rest = &id[start..];
+                if let Some(end) = rest.find('&') {
+                    if let Some(pid_start) = rest.find("pid_") {
+                        let pid_rest = &rest[pid_start..];
+                        if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
+                            return rest[..end + pid_end].to_string();
+                        }
+                    }
+                }
+            }
+            String::new()
+        };
+        let monitor_usb = extract_usb_id(&monitor_output_id);
+        let input_usb = extract_usb_id(&input_device_id);
+        let same_device = !monitor_usb.is_empty() && monitor_usb == input_usb;
+
+        if same_device {
+            log::warn!("Monitor skipped: default output '{}' shares USB ID '{}' with input '{}'", monitor_output_name, monitor_usb, input_friendly);
+        } else if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
             let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
             if m_client.initialize_client(
                 &monitor_format,
@@ -1240,6 +1280,33 @@ fn audio_loop(
                     let pre_gain_peak = mixed_samples.iter()
                         .map(|s| s.abs()).fold(0.0f32, f32::max);
 
+                    // ============ 监听流启停控制（必须在写入之前）============
+                    let current_monitor_point = monitor_point.load(Ordering::Relaxed);
+                    let monitor_wants = monitor_enabled.load(Ordering::Relaxed) && current_monitor_point > 0;
+                    if monitor_wants {
+                        if !monitor_was_streaming {
+                            if let Some(ref mut m_client) = monitor_client_opt {
+                                let _ = m_client.start_stream();
+                            }
+                            monitor_was_streaming = true;
+                        }
+                    } else if monitor_was_streaming {
+                        if let Some(ref mut m_client) = monitor_client_opt {
+                            let _ = m_client.stop_stream();
+                        }
+                        monitor_was_streaming = false;
+                    }
+
+                    // 监听点 1=原始输入（降噪前的 chunk）
+                    if monitor_wants && current_monitor_point == 1 {
+                        write_to_monitor(&chunk, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                    }
+
+                    // 监听点 2=降噪后（strength mixing 后，增益前）
+                    if monitor_wants && current_monitor_point == 2 {
+                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                    }
+
                     // 应用麦克风增益（在降噪后，避免放大噪音）
                     let mic_gain = current_config.mic_gain;
                     let mixed_samples: Vec<f32> = mixed_samples.iter().map(|s| s * mic_gain).collect();
@@ -1247,6 +1314,11 @@ fn audio_loop(
                     // ====== 诊断：增益后峰值 ======
                     let post_gain_peak = mixed_samples.iter()
                         .map(|s| s.abs()).fold(0.0f32, f32::max);
+
+                    // 监听点 3=增益后（EQ 前）
+                    if monitor_wants && current_monitor_point == 3 {
+                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                    }
 
                     // ============ EQ 均衡器 ============
                     let current_eq = eq_config.read().clone();
@@ -1263,10 +1335,14 @@ fn audio_loop(
                     let post_eq_peak = mixed_samples.iter()
                         .map(|s| s.abs()).fold(0.0f32, f32::max);
 
+                    // 监听点 4=EQ后
+                    if monitor_wants && current_monitor_point == 4 {
+                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                    }
+
                     // ============ 💥 爆炸模式：方波失真 ============
                     let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
                         let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
-                        // 映射 0-100 → 50-100，0% 时就有明显效果
                         let mapped = 50.0 + intensity * 0.5;
                         let gain = 1.0 + (mapped / 100.0).powf(0.6) * 49.0;
                         let clip = 32000.0 - (mapped / 100.0).powf(1.5) * 31800.0;
@@ -1281,53 +1357,6 @@ fn audio_loop(
                     } else {
                         mixed_samples
                     };
-
-                    // ============ 监听输出 ============
-                    let monitor_wants = monitor_enabled.load(Ordering::Relaxed);
-                    if monitor_wants {
-                        // 从关闭切换到开启：重新启动流
-                        if !monitor_was_streaming {
-                            if let Some(ref mut m_client) = monitor_client_opt {
-                                let _ = m_client.start_stream();
-                            }
-                            monitor_was_streaming = true;
-                        }
-                        if let Some(ref monitor_render) = monitor_render_opt {
-                            let monitor_ready = if let Some(ref evt) = monitor_event_opt {
-                                evt.wait_for_event(10).is_ok()
-                            } else {
-                                true
-                            };
-                            if monitor_ready {
-                                // 重采样到监听设备采样率
-                                let monitor_resampled = if output_sample_rate != 48000 {
-                                    resample_linear(&mixed_samples, 48000, output_sample_rate)
-                                } else {
-                                    mixed_samples.clone()
-                                };
-                                let monitor_stereo = upmix_to_stereo(&monitor_resampled, 2);
-                                // monitor_stereo 已是交错立体声 [L0,R0,L1,R1,...]，直接写入
-                                for (i, &sample) in monitor_stereo.iter().enumerate() {
-                                    let val = (sample.clamp(-32768.0, 32767.0)) as i16;
-                                    let bytes = val.to_le_bytes();
-                                    monitor_buffer[i * 2] = bytes[0];
-                                    monitor_buffer[i * 2 + 1] = bytes[1];
-                                }
-                                let monitor_frames = monitor_resampled.len();
-                                let _ = monitor_render.write_to_device(
-                                    monitor_frames,
-                                    &monitor_buffer[..monitor_frames * 4],
-                                    None,
-                                );
-                            }
-                        }
-                    } else if monitor_was_streaming {
-                        // 从开启切换到关闭：停止流 + 写入静音，立即静音
-                        if let Some(ref mut m_client) = monitor_client_opt {
-                            let _ = m_client.stop_stream();
-                        }
-                        monitor_was_streaming = false;
-                    }
 
                     // ============ BGM 混音 ============
                     let final_samples = if bgm_running.load(Ordering::Relaxed) {
@@ -1411,6 +1440,11 @@ fn audio_loop(
                     // ====== 诊断：limiter 后峰值 ======
                     let output_peak = limited_samples.iter()
                         .map(|s| s.abs()).fold(0.0f32, f32::max);
+
+                    // 监听点 5=最终输出（limiter 后）
+                    if monitor_wants && current_monitor_point == 5 {
+                        write_to_monitor(&limited_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                    }
 
                     // 6. 重采样回设备采样率
                     let resampled_out = if output_sample_rate != 48000 {
@@ -1609,6 +1643,44 @@ fn compute_spectrum(samples: &[f32], bands: usize) -> Vec<f32> {
     }
 
     spectrum
+}
+
+/// 将 f32 样本写入监听设备
+fn write_to_monitor(
+    samples: &[f32],
+    render_opt: &Option<AudioRenderClient>,
+    event_opt: &Option<wasapi::Handle>,
+    buffer: &mut [u8],
+    output_sample_rate: u32,
+) {
+    let render = match render_opt {
+        Some(r) => r,
+        None => return,
+    };
+    let ready = match event_opt {
+        Some(evt) => evt.wait_for_event(10).is_ok(),
+        None => true,
+    };
+    if !ready {
+        return;
+    }
+    // 重采样到监听设备采样率
+    let resampled = if output_sample_rate != 48000 {
+        resample_linear(samples, 48000, output_sample_rate)
+    } else {
+        samples.to_vec()
+    };
+    let stereo = upmix_to_stereo(&resampled, 2);
+    for (i, &sample) in stereo.iter().enumerate() {
+        let val = (sample.clamp(-32768.0, 32767.0)) as i16;
+        let bytes = val.to_le_bytes();
+        if i * 2 + 1 < buffer.len() {
+            buffer[i * 2] = bytes[0];
+            buffer[i * 2 + 1] = bytes[1];
+        }
+    }
+    let frames = resampled.len();
+    let _ = render.write_to_device(frames, &buffer[..frames * 4], None);
 }
 
 /// 线性插值重采样：将音频从 from_rate 重采样到 to_rate

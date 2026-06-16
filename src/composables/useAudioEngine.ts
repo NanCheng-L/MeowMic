@@ -33,6 +33,10 @@ export function useAudioEngine() {
     await invoke('set_monitor_mode', { enabled })
   }
 
+  const setMonitorPoint = async (point: number) => {
+    await invoke('set_monitor_point', { point })
+  }
+
   return {
     startDenoising,
     stopDenoising,
@@ -42,5 +46,6 @@ export function useAudioEngine() {
     listDenoiseModels,
     installVBCable,
     setMonitorMode,
+    setMonitorPoint,
   }
 }
