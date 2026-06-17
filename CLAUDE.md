@@ -108,6 +108,8 @@ scripts/                # 构建/发布辅助脚本
 - **监听点启动同步**：`monitor_point` 后端默认为 0（关闭），前端 localStorage 保存的值需在引擎启动后调用 `setMonitor_point` 同步，否则监听不生效。需在 `handleStart` 和 HMR 热重载恢复路径中都同步
 - **监听点必须在处理阶段之前**：监听点写入必须放在对应处理阶段**之前**（如点 2 在增益前、点 3 在增益后），否则所有点读到的是同一个变量（已被后续阶段覆盖）。常见错误：把所有监听点放在处理链路末尾
 - **设置窗口模型列表兜底**：设置窗口首次打开时，`settings-init` 事件可能因窗口未加载完而丢失。需在 `onMounted` 中直接调用 `list_denoise_models` 兜底加载
+- **WASAPI 监听设备自动跟随**：监听使用系统默认输出设备，但 WASAPI 客户端在创建时绑定设备，不会自动跟随系统默认设备变更。需要每秒检查 `find_device(None, false)` 的 ID 是否变化，变化时停止旧客户端、重新初始化新客户端。闭包捕获的变量（`monitor_format`、`input_device_id`）必须在闭包定义前提取为独立变量
+- **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
 
 ## 版本号管理
 
@@ -139,9 +141,6 @@ pnpm tauri signer generate -w tauri.key
 
 - 公钥填入 `tauri.conf.json` 的 `plugins.updater.pubkey`
 - 私钥文件 `tauri.key` 不要提交到 git
-
-- **WASAPI 监听设备自动跟随**：监听使用系统默认输出设备，但 WASAPI 客户端在创建时绑定设备，不会自动跟随系统默认设备变更。需要每秒检查 `find_device(None, false)` 的 ID 是否变化，变化时停止旧客户端、重新初始化新客户端。闭包捕获的变量（`monitor_format`、`input_device_id`）必须在闭包定义前提取为独立变量
-- **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
 
 ## 红线
 

@@ -10,7 +10,7 @@
 
 👉 [**点击下载最新版本**](https://github.com/NanCheng-L/MeowMic/releases/latest)
 
-> 进入下载页面后，找到 `.exe` 后缀的文件（如 `MeowMic_0.2.2_x64-setup.exe`），点击下载并双击运行安装。
+> 进入下载页面后，找到 `.exe` 后缀的文件（如 `MeowMic_0.2.3_x64-setup.exe`），点击下载并双击运行安装。
 
 <table>
   <tr>
