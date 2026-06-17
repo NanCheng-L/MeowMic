@@ -639,12 +639,13 @@ onUnmounted(() => {
         <h1>MeowMic</h1>
       </div>
       <div class="header-right">
-        <button class="settings-btn" @click="openTutorial" :title="t('tutorial.title')">
+        <button class="settings-btn tutorial-btn" @click="openTutorial" :title="t('tutorial.title')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
             <line x1="12" y1="17" x2="12.01" y2="17"/>
           </svg>
+          <span class="btn-text">{{ t('tutorial.title') }}</span>
         </button>
         <button class="settings-btn" @click="openSettings" :title="t('settings.title')">
           <span v-if="hasUpdate" class="update-badge"></span>
@@ -807,6 +808,17 @@ onUnmounted(() => {
 .settings-btn:hover {
   color: var(--text-primary);
   background: var(--border);
+}
+
+.tutorial-btn {
+  gap: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tutorial-btn .btn-text {
+  white-space: nowrap;
 }
 
 .main {
