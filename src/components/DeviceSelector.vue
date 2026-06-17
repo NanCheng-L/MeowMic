@@ -38,8 +38,9 @@ const sameDeviceWarning = computed(() => {
   }
   const inputModel = extractModel(props.inputValue)
   const outputModel = extractModel(props.outputValue)
-  // 型号相同且不为空，且不是 VB-Cable
-  return inputModel && inputModel === outputModel && !inputModel.includes('cable')
+  // 只对 USB 设备警告，内置声卡（Realtek、Conexant 等）的麦克风和扬声器是不同端点
+  const isUsb = (name: string) => /usb|cable/i.test(name)
+  return inputModel && inputModel === outputModel && isUsb(props.inputValue)
 })
 
 const installing = ref(false)

@@ -34,6 +34,19 @@ const loadProcesses = async () => {
   }
 }
 
+// 监听全局快捷键触发的 BGM 开关
+const handleHotkeyToggle = () => {
+  handleToggle(!enabled.value)
+}
+
+onMounted(() => {
+  window.addEventListener('hotkey-toggle-bgm', handleHotkeyToggle)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('hotkey-toggle-bgm', handleHotkeyToggle)
+})
+
 const handleToggle = async (val: boolean) => {
   loading.value = true
   try {

@@ -1,8 +1,6 @@
 mod rnnoise;
-mod deepfilter;
 
 use rnnoise::RnnoiseModel;
-use deepfilter::DeepFilterModel;
 
 /// 降噪模型统一接口
 /// 所有模型约束：480 samples/帧、48kHz、f32 输入输出
@@ -23,28 +21,12 @@ pub const FRAME_SIZE: usize = 480;
 /// 列出所有可用模型
 pub fn list_models() -> Vec<&'static str> {
     vec!["RNNoise"]
-    // TODO: DeepFilterNet 特征归一化未对齐训练管线，暂时隐藏
-    // vec!["RNNoise", "DeepFilterNet"]
 }
 
 /// 根据名称创建模型实例
-pub fn create_model(name: &str, resource_dir: Option<&std::path::Path>) -> Box<dyn DenoiseModel> {
+pub fn create_model(name: &str, _resource_dir: Option<&std::path::Path>) -> Box<dyn DenoiseModel> {
     match name {
         "RNNoise" => Box::new(RnnoiseModel::new()),
-        "DeepFilterNet" => {
-            if let Some(dir) = resource_dir {
-                match DeepFilterModel::new(&dir.to_path_buf()) {
-                    Ok(m) => Box::new(m),
-                    Err(e) => {
-                        log::error!("Failed to load DeepFilterNet: {}, falling back to RNNoise", e);
-                        Box::new(RnnoiseModel::new())
-                    }
-                }
-            } else {
-                log::error!("No resource directory for DeepFilterNet, falling back to RNNoise");
-                Box::new(RnnoiseModel::new())
-            }
-        }
         _ => Box::new(RnnoiseModel::new()),
     }
 }

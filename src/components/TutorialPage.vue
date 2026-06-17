@@ -55,6 +55,41 @@ onUnmounted(() => {
         </div>
       </section>
 
+      <!-- 配置示例 -->
+      <section class="section">
+        <h2>{{ t('tutorial.exampleTitle') }}</h2>
+        <div class="example-box">
+          <div class="example-header">
+            <span class="example-icon">🎙️</span>
+            <strong>{{ t('tutorial.exampleMeowmic') }}</strong>
+          </div>
+          <div class="example-row">
+            <span class="example-label">输入设备：</span>
+            <span class="example-value">麦克风 (Realtek(R) Audio)</span>
+          </div>
+          <div class="example-row">
+            <span class="example-label">输出设备：</span>
+            <span class="example-value highlight">CABLE Input (VB-Audio Virtual Cable)</span>
+          </div>
+        </div>
+
+        <div class="example-box">
+          <div class="example-header">
+            <span class="example-icon">🎮</span>
+            <strong>{{ t('tutorial.exampleApp') }}</strong>
+          </div>
+          <div class="example-row">
+            <span class="example-label">音频输入设备：</span>
+            <span class="example-value highlight">CABLE Output (VB-Audio Virtual Cable)</span>
+          </div>
+        </div>
+
+        <div class="tip-box">
+          <span class="tip-icon">💡</span>
+          <span>{{ t('tutorial.exampleNote') }}</span>
+        </div>
+      </section>
+
       <!-- 设备说明 -->
       <section class="section">
         <h2>{{ t('tutorial.deviceGuide') }}</h2>
@@ -98,6 +133,10 @@ onUnmounted(() => {
         <div class="faq-item">
           <strong>{{ t('tutorial.faq3Q') }}</strong>
           <p>{{ t('tutorial.faq3A') }}</p>
+        </div>
+        <div class="faq-item">
+          <strong>{{ t('tutorial.faq4Q') }}</strong>
+          <p>{{ t('tutorial.faq4A') }}</p>
         </div>
       </section>
 
@@ -246,6 +285,61 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--text-muted);
   margin: 0;
+}
+
+/* Example boxes */
+.example-box {
+  padding: 14px;
+  background: var(--surface);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.example-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.example-header strong {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.example-icon {
+  font-size: 18px;
+}
+
+.example-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+
+.example-row:last-child {
+  margin-bottom: 0;
+}
+
+.example-label {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.example-value {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-family: 'DM Mono', monospace;
+}
+
+.example-value.highlight {
+  color: var(--accent);
+  font-weight: 500;
 }
 
 /* Tip box */

@@ -34,8 +34,7 @@ log = "0.4"
 env_logger = "0.11"
 muda = "0.19"
 nnnoiseless = { version = "0.5.2", default-features = false }
-deep_filter = { version = "0.2.5", default-features = false, features = ["transforms"] }
-tract-onnx = "0.21"
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

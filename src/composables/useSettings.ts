@@ -4,6 +4,14 @@ import { ref } from 'vue'
 interface AppSettings {
   hotkey: string
   hotkeyEnabled: boolean
+  hotkeyExplode: string
+  hotkeyExplodeEnabled: boolean
+  hotkeyMonitor: string
+  hotkeyMonitorEnabled: boolean
+  hotkeyBgm: string
+  hotkeyBgmEnabled: boolean
+  hotkeyEq: string
+  hotkeyEqEnabled: boolean
   autostart: boolean
   language: string
 }
@@ -11,6 +19,14 @@ interface AppSettings {
 const settings = ref<AppSettings>({
   hotkey: 'Ctrl+Shift+D',
   hotkeyEnabled: true,
+  hotkeyExplode: '',
+  hotkeyExplodeEnabled: false,
+  hotkeyMonitor: '',
+  hotkeyMonitorEnabled: false,
+  hotkeyBgm: '',
+  hotkeyBgmEnabled: false,
+  hotkeyEq: '',
+  hotkeyEqEnabled: false,
   autostart: false,
   language: 'zh-CN',
 })
@@ -40,8 +56,20 @@ export function useSettings() {
     }
   }
 
-  const registerHotkey = async (hotkey: string) => {
-    await invoke('register_hotkey', { hotkey })
+  const registerHotkey = async (
+    hotkey: string,
+    hotkeyExplode: string = '',
+    hotkeyMonitor: string = '',
+    hotkeyBgm: string = '',
+    hotkeyEq: string = '',
+  ) => {
+    await invoke('register_hotkey', {
+      hotkey,
+      hotkeyExplode,
+      hotkeyMonitor,
+      hotkeyBgm,
+      hotkeyEq,
+    })
   }
 
   const unregisterHotkey = async () => {

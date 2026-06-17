@@ -27,6 +27,14 @@ struct EngineState {
 struct AppSettings {
     hotkey: String,
     hotkey_enabled: bool,
+    hotkey_explode: String,
+    hotkey_explode_enabled: bool,
+    hotkey_monitor: String,
+    hotkey_monitor_enabled: bool,
+    hotkey_bgm: String,
+    hotkey_bgm_enabled: bool,
+    hotkey_eq: String,
+    hotkey_eq_enabled: bool,
     autostart: bool,
     language: String,
 }
@@ -36,6 +44,14 @@ impl Default for AppSettings {
         Self {
             hotkey: "Ctrl+Shift+D".into(),
             hotkey_enabled: true,
+            hotkey_explode: String::new(),
+            hotkey_explode_enabled: false,
+            hotkey_monitor: String::new(),
+            hotkey_monitor_enabled: false,
+            hotkey_bgm: String::new(),
+            hotkey_bgm_enabled: false,
+            hotkey_eq: String::new(),
+            hotkey_eq_enabled: false,
             autostart: false,
             language: "zh-CN".into(),
         }
@@ -95,7 +111,7 @@ fn start_denoising(
     // 优先用 Tauri 资源目录（build 模式），fallback 到源码目录（dev 模式）
     let resource_dir = app.path().resource_dir().ok().map(|d| {
         let models_dir = d.join("models");
-        if models_dir.join("enc.onnx").exists() {
+        if models_dir.join("denoise.onnx").exists() {
             models_dir
         } else {
             // dev 模式：资源在 src-tauri/resources/models/
@@ -152,7 +168,10 @@ fn list_input_devices() -> Result<Vec<String>, String> {
     for i in 0..count {
         if let Ok(device) = collection.get_device_at_index(i) {
             if let Ok(name) = device.get_friendlyname() {
-                devices.push(name);
+                // 过滤掉 VB-Cable Output，避免用户误选导致无声
+                if !name.contains("CABLE Output") {
+                    devices.push(name);
+                }
             }
         }
     }
@@ -190,64 +209,50 @@ async fn install_vb_cable(app: AppHandle) -> Result<String, String> {
         if p.exists() { Some(p) } else { None }
     });
 
-    let setup_path = setup_path.ok_or("VB-Cable installer not found in resources")?;
-    let setup_str = setup_path.to_str().ok_or("Invalid path")?;
-    let work_dir = setup_path.parent().unwrap_or(std::path::Path::new("."));
-    let work_str = work_dir.to_str().unwrap_or(".");
+    let setup_path = match setup_path {
+        Some(p) => p,
+        None => {
+            // 兜底：从官网下载
+            log::info!("VB-Cable installer not found locally, downloading...");
+            let download_url = "https://vb-audio.com/Cable/VBCABLE_Setup_x64.exe";
+            let tmp_dir = std::env::temp_dir().join("meowmic-vb-cable");
+            let _ = std::fs::create_dir_all(&tmp_dir);
+            let dest = tmp_dir.join("VBCABLE_Setup_x64.exe");
 
-    log::info!("Installing VB-Cable from: {}", setup_str);
+            let output = std::process::Command::new("curl.exe")
+                .args(["-L", "-o", dest.to_str().unwrap(), download_url, "--progress-bar"])
+                .output()
+                .map_err(|e| format!("Failed to download VB-Cable: {}", e))?;
 
-    // raw FFI: ShellExecuteW + "runas" 触发 UAC（UAC 显示 VB-Cable 安装程序）
-    extern "system" {
-        pub fn ShellExecuteW(
-            hwnd: *mut core::ffi::c_void,
-            lpoperation: *const u16,
-            lpfile: *const u16,
-            lpparameters: *const u16,
-            lpdirectory: *const u16,
-            nshowcmd: u32,
-        ) -> *mut core::ffi::c_void;
-    }
+            if !output.status.success() {
+                return Err("Failed to download VB-Cable installer".to_string());
+            }
 
-    let setup_wide: Vec<u16> = setup_str.encode_utf16().chain(std::iter::once(0)).collect();
-    let runas_wide: Vec<u16> = "runas\0".encode_utf16().collect();
-    let work_wide: Vec<u16> = work_str.encode_utf16().chain(std::iter::once(0)).collect();
-
-    let result = unsafe {
-        ShellExecuteW(
-            core::ptr::null_mut(),
-            runas_wide.as_ptr(),
-            setup_wide.as_ptr(),
-            core::ptr::null(),  // 不传 /SILENT，让用户在安装器中操作
-            work_wide.as_ptr(),
-            1, // SW_SHOWNORMAL
-        )
-    };
-
-    if result as usize <= 32 {
-        return Err(format!("Failed to launch installer (UAC denied?), code: {}", result as usize));
-    }
-
-    // 轮询检测 VB-Cable 是否出现（最多等 60 秒，用户需要手动点安装）
-    let _ = wasapi::initialize_mta().ok();
-    for _ in 0..60 {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        if let Ok(collection) = wasapi::DeviceCollection::new(&wasapi::Direction::Render) {
-            let count = collection.get_nbr_devices().unwrap_or(0);
-            for i in 0..count {
-                if let Ok(device) = collection.get_device_at_index(i) {
-                    if let Ok(name) = device.get_friendlyname() {
-                        if name.to_lowercase().contains("cable") {
-                            log::info!("VB-Cable installed and detected: {}", name);
-                            return Ok("VB-Cable installed successfully".to_string());
-                        }
-                    }
-                }
+            if dest.exists() { dest } else {
+                return Err("VB-Cable installer not found after download".to_string());
             }
         }
-    }
+    };
+    let setup_str = setup_path.to_str().ok_or("Invalid path")?;
 
-    Err("timed out".to_string())
+    // 用 PowerShell 启动安装程序（自动提权）
+    log::info!("Installing VB-Cable from: {}", setup_str);
+
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-WindowStyle", "Hidden",
+        "-Command",
+        &format!("Start-Process -FilePath '{}' -Verb RunAs", setup_str),
+    ]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.spawn().map_err(|e| format!("Failed to run PowerShell: {}", e))?;
+
+    Ok("VB-Cable installer launched".to_string())
 }
 
 #[tauri::command]
@@ -276,24 +281,50 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn register_hotkey(app: AppHandle, hotkey: String) -> Result<(), String> {
+fn register_hotkey(
+    app: AppHandle,
+    hotkey: String,
+    hotkey_explode: String,
+    hotkey_monitor: String,
+    hotkey_bgm: String,
+    hotkey_eq: String,
+) -> Result<(), String> {
     // 先注销旧的
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| e.to_string())?;
 
-    let shortcut =
-        Shortcut::from_str(&hotkey).map_err(|e| format!("快捷键格式错误: {}", e))?;
+    let shortcuts: Vec<(&str, &str)> = vec![
+        (&hotkey, "toggle-denoise"),
+        (&hotkey_explode, "toggle-explode"),
+        (&hotkey_monitor, "toggle-monitor"),
+        (&hotkey_bgm, "toggle-bgm"),
+        (&hotkey_eq, "toggle-eq"),
+    ]
+    .iter()
+    .filter(|(k, _)| !k.is_empty())
+    .map(|(k, e)| (k.as_str(), *e))
+    .collect();
 
-    app.global_shortcut()
-        .on_shortcut(shortcut, |app, _shortcut, event| {
-            if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.emit("toggle-denoise", ());
-                }
+    for (key, event) in shortcuts {
+        let shortcut = match Shortcut::from_str(key) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Invalid hotkey '{}': {}", key, e);
+                continue;
             }
-        })
-        .map_err(|e| e.to_string())?;
+        };
+        let event_name = event.to_string();
+        app.global_shortcut()
+            .on_shortcut(shortcut, move |app, _shortcut, event| {
+                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.emit(&event_name, ());
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -404,7 +435,6 @@ fn list_denoise_models() -> Vec<&'static str> {
     denoise::list_models()
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
 
@@ -509,20 +539,30 @@ pub fn run() {
                     }
 
                     // 注册全局快捷键
-                    if s.hotkey_enabled {
-                        if let Ok(shortcut) = Shortcut::from_str(&s.hotkey) {
-                            let _ = app.global_shortcut().on_shortcut(
-                                shortcut,
-                                |app, _shortcut, event| {
-                                    if event.state
-                                        == tauri_plugin_global_shortcut::ShortcutState::Pressed
-                                    {
-                                        if let Some(window) = app.get_webview_window("main") {
-                                            let _ = window.emit("toggle-denoise", ());
+                    let hotkeys: Vec<(&str, bool, &str)> = vec![
+                        (&s.hotkey, s.hotkey_enabled, "toggle-denoise"),
+                        (&s.hotkey_explode, s.hotkey_explode_enabled, "toggle-explode"),
+                        (&s.hotkey_monitor, s.hotkey_monitor_enabled, "toggle-monitor"),
+                        (&s.hotkey_bgm, s.hotkey_bgm_enabled, "toggle-bgm"),
+                        (&s.hotkey_eq, s.hotkey_eq_enabled, "toggle-eq"),
+                    ];
+                    for (key, enabled, event) in hotkeys {
+                        if enabled && !key.is_empty() {
+                            if let Ok(shortcut) = Shortcut::from_str(key) {
+                                let event_name = event.to_string();
+                                let _ = app.global_shortcut().on_shortcut(
+                                    shortcut,
+                                    move |app, _shortcut, event| {
+                                        if event.state
+                                            == tauri_plugin_global_shortcut::ShortcutState::Pressed
+                                        {
+                                            if let Some(window) = app.get_webview_window("main") {
+                                                let _ = window.emit(&event_name, ());
+                                            }
                                         }
-                                    }
-                                },
-                            );
+                                    },
+                                );
+                            }
                         }
                     }
                 }

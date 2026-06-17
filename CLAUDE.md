@@ -7,7 +7,13 @@
 - **前端**：Vue 3 + TypeScript + Vite
 - **后端**：Rust (Tauri 2)
 - **音频 API**：WASAPI (Windows Audio Session API)
-- **降噪**：nnnoiseless（RNNoise，可用）+ DeepFilterNet3（tract-onnx，代码已写但特征归一化未对齐训练管线，暂时隐藏）
+- **降噪**：nnnoiseless（RNNoise）+ MeowMic（自训练 ONNX 模型，Rust 原生推理）
+
+## 降噪模型架构
+
+- **RNNoise**：原生 Rust 实现（nnnoiseless），<1ms，擅长持续噪声（风扇、空调）
+- **MeowMic**：自训练模型（ONNX），Rust 原生推理（ort crate），擅长瞬态噪声（键盘、鼠标）
+- 模型选择：RNNoise / MeowMic（本地 ONNX）
 - **虚拟音频设备**：VB-Audio Virtual Cable
 - **全局快捷键**：tauri-plugin-global-shortcut
 - **配置持久化**：tauri-plugin-store
@@ -35,7 +41,7 @@ src/                    # Vue 前端
   eq-main.ts            # 均衡器窗口入口
 src-tauri/src/          # Rust 后端
   audio_engine.rs       # WASAPI 音频引擎
-  denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs）
+  denoise/              # 降噪模型（mod.rs trait + rnnoise.rs）
   eq.rs                 # EQ 均衡器（Biquad IIR 滤波器 + 10 段 Peaking EQ）
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
   lib.rs                # Tauri 命令注册 + 系统托盘 + 设置管理
@@ -63,11 +69,9 @@ scripts/                # 构建/发布辅助脚本
 - **多语言**：使用 vue-i18n，语言偏好存 localStorage `meowmic-lang`，选择后即时切换（不需要点保存）。每个独立窗口（主窗口/教程/设置/均衡器）必须：① onMounted 时读取 localStorage 调用 setLocale()；② setInterval 轮询同步；③ storage 事件监听跨窗口同步。详细规范见 `docs/eq-spec.md` §6.4
 - **nnnoiseless DenoiseState**：`new()` 返回 `Box<DenoiseState<'static>>`，结构体有 phantom lifetime 参数 `'a`，字段类型需用 `Box<DenoiseState<'static>>`
 - **前端引擎重启竞争**：设备切换、热拔插、模型切换都会触发 stop+start，多条路径并发调用导致 "Engine is already running"。必须用统一的 debounce restart 函数 + 锁；Vite HMR 重载时前端 ref 重置但 Rust 引擎仍在跑，`handleStart` 需捕获 `already running` 并同步状态
-- **deep\_filter crate lib 名**：Cargo.toml 包名是 `deep_filter`，但 `[lib] name = "df"`，代码中必须 `use df::DFState`，不能 `use deep_filter::DFState`
 - **Tauri 资源打包**：资源按类型分目录（`resources/models/`、`resources/vb-cable/`），`tauri.conf.json` 的 `bundle.resources` 用 `resources/models/*`、`resources/vb-cable/*` 声明；运行时通过 `app.path().resource_dir()` 获取路径
 - **ONNX 模型加载阻塞**：tract 加载 ONNX 文件可能需要几秒，在音频线程上执行会阻塞 WASAPI 导致炸麦。必须在音频线程启动前预加载，或用异步加载+直通模式过渡
-- **DeepFilterNet 特征归一化**：Rust 端的 ERB 特征提取和归一化必须精确匹配原始 Python 训练管线（log-scale? fixed stats? EMA tau?），否则模型输出增益全线偏低（avg \~0.2），语音被压制。需要对照 `libdf` crate 或 Python 源码逐行对齐，不能靠猜
-- **VB-Audio Cable 驱动安装**：打包时必须包含完整驱动包（.inf + .sys + .cat + ARM64 .sys），缺少任一文件会导致安装静默失败；用 `ShellExecuteW` + `"runas"` 触发 UAC 提权，`Command::new()` 不会自动提权会报 os error 740；安装后 WASAPI 设备列表可能有缓存延迟，需重启应用才能检测到新设备
+- **VB-Audio Cable 驱动安装**：打包时必须包含完整驱动包（.inf + .sys + .cat + ARM64 .sys），缺少任一文件会导致安装静默失败；用 PowerShell `Start-Process -Verb RunAs` 触发 UAC 提权，配合 `CREATE_NO_WINDOW` 标志隐藏控制台窗口；本地找不到安装包时自动从官网下载兜底；安装后 WASAPI 设备列表可能有缓存延迟，需重启应用才能检测到新设备
 - **Tauri dev 资源目录**：`app.path().resource_dir()` 在 dev 模式指向 `target/debug/`，需 fallback 到 `CARGO_MANIFEST_DIR/resources/models`（模型）和 `resources/vb-cable`（驱动）
 - **WASAPI 多设备输出**：监听功能需要同时向两个设备写入音频，每个 WASAPI render client 必须独立设置事件句柄（`set_get_eventhandle`）并在写入前 `wait_for_event`，否则会出现 `0x88890006`（`AUDCLNT_BUFFER_OVERFLOW`）缓冲区溢出错误，导致无声
 - **WASAPI 监听格式**：监听设备不能复用主输出的 `output_format`（可能是 32-bit float），必须用固定 `WaveFormat::new(16, 16, &SampleType::Int, ...)` 初始化，因为写入代码固定按 i16 处理。格式不匹配会导致无声
@@ -97,6 +101,9 @@ scripts/                # 构建/发布辅助脚本
 - **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`
 - **Soft limiter 阈值与压缩比**：阈值不能太高（28000 太接近 0dBFS），压缩比不能太温和（0.2 即 5:1 仍可能输出 30000+）。推荐阈值 24000、压缩比 0.1（10:1）、硬上限 30000
 - **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏
+- **Realtek 内置声卡同名设备不是同一设备**："麦克风 (Realtek(R) Audio)" 和 "扬声器 (Realtek(R) Audio)" 共享型号名但物理端点不同，不会导致 WASAPI 死锁。same-device 检测只针对 USB 设备（正则 `/usb|cable/i`）
+- **Azure Blob Storage 不支持断点续传**：`curl -C -` 失败，下载必须一次性完成或重新开始。DNS Challenge 数据从 `dns4public.blob.core.windows.net` 下载无 resume 支持
+- **输出到扬声器导致电流麦（回声反馈）**：降噪音频 → 扬声器播放 → 麦克风拾取 → 再次降噪 → 循环产生嗡嗡声。必须使用 VB-Cable 虚拟声卡作为输出设备
 - **WASAPI 监听同设备检测**：监听使用系统默认输出设备（`find_device(None, false)`），可能与输入是同一 USB 物理设备（如 K7 麦克风 + K7 耳机）。通过提取设备 ID 中的 USB VID/PID 比较，相同则跳过监听初始化，避免共享 USB 时钟导致的电流麦干扰
 - **监听点启动同步**：`monitor_point` 后端默认为 0（关闭），前端 localStorage 保存的值需在引擎启动后调用 `setMonitor_point` 同步，否则监听不生效。需在 `handleStart` 和 HMR 热重载恢复路径中都同步
 - **监听点必须在处理阶段之前**：监听点写入必须放在对应处理阶段**之前**（如点 2 在增益前、点 3 在增益后），否则所有点读到的是同一个变量（已被后续阶段覆盖）。常见错误：把所有监听点放在处理链路末尾

@@ -76,6 +76,14 @@ const openSettings = async () => {
         availableModels: availableModels.value,
         hotkey: settings.value.hotkey,
         hotkeyEnabled: settings.value.hotkeyEnabled,
+        hotkeyExplode: settings.value.hotkeyExplode,
+        hotkeyExplodeEnabled: settings.value.hotkeyExplodeEnabled,
+        hotkeyMonitor: settings.value.hotkeyMonitor,
+        hotkeyMonitorEnabled: settings.value.hotkeyMonitorEnabled,
+        hotkeyBgm: settings.value.hotkeyBgm,
+        hotkeyBgmEnabled: settings.value.hotkeyBgmEnabled,
+        hotkeyEq: settings.value.hotkeyEq,
+        hotkeyEqEnabled: settings.value.hotkeyEqEnabled,
         autostart: settings.value.autostart,
         language: localStorage.getItem('meowmic-lang') || 'zh-CN',
         theme: theme.value,
@@ -463,8 +471,9 @@ watch([denoiseEnabled, denoiseStrength], () => {
   saveConfig()
 })
 
-// 用户通过下拉列表切换设备时，重启引擎
+// 用户通过下拉列表切换设备时，重启引擎并保存配置
 watch([selectedInput, selectedOutput], () => {
+  saveConfig()
   if (initialized && isRunning.value) {
     scheduleRestart(100)
   }
@@ -498,6 +507,35 @@ onMounted(async () => {
     toggleDenoise()
   })
 
+  // 监听炸麦快捷键
+  await listen('toggle-explode', async () => {
+    const next = !explodeEnabled.value
+    explodeEnabled.value = next
+    try {
+      await invoke('set_explode_mode', { enabled: next, intensity: Math.round(explodeIntensity.value * 100) })
+    } catch (e) {
+      console.error('Failed to set explode mode:', e)
+    }
+    saveConfig()
+  })
+
+  // 监听监听快捷键
+  await listen('toggle-monitor', async () => {
+    const next = !monitorEnabled.value
+    await handleMonitorChange(next)
+  })
+
+  // 监听 BGM 快捷键
+  await listen('toggle-bgm', () => {
+    window.dispatchEvent(new CustomEvent('hotkey-toggle-bgm'))
+  })
+
+  // 监听 EQ 快捷键
+  await listen('toggle-eq', async () => {
+    const next = !eqEnabled.value
+    await handleEqEnabledChange(next)
+  })
+
   // 监听 EQ 窗口状态变更
   unlistenEq = await listen<{ enabled: boolean; preset?: string }>('eq-changed', (event) => {
     eqEnabled.value = event.payload.enabled
@@ -506,6 +544,13 @@ onMounted(async () => {
       localStorage.setItem('meowmic-eq-preset', event.payload.preset)
     }
     saveConfig()
+  })
+
+  // 监听设置窗口保存事件，重新读取后端设置
+  await listen('settings-saved', async () => {
+    try {
+      await loadSettings()
+    } catch {}
   })
 
   // 监听设备热拔插事件（防抖：快速插拔只触发一次重启）

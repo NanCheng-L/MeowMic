@@ -50,8 +50,7 @@ Phase 0-11 + 设备热拔插 + i18n 已完成（2026-06-06）：
 > 多模型架构 + AI 模型替换 RNNoise + 预设模式 + 托盘常驻 + 多语言
 
 - [x] 多模型架构（DenoiseModel trait + 模型选择 UI）— 2026-06-06
-- [ ] DeepFilterNet 模型集成（tract-onnx 推理，3 个 ONNX 模型：enc + erb_dec + df_dec）— 代码已写好但炸麦，需异步加载
-- [ ] 自定义模型训练（使用 DNS Challenge 数据集微调）
+- [x] 自定义模型训练框架搭建（FullSubNet+，DNS Challenge 数据集训练中）— 2026-06-17
 - [x] 预设模式（安静/标准/嘈杂/直播，滑块联动）— 2026-06-06
 - [x] 托盘常驻 + 开机自启动
 - [x] 全局快捷键切换
@@ -138,7 +137,6 @@ Offload Pin → Topology → Line Out（实际音频输出）
 src-tauri/src/denoise/
   mod.rs          # DenoiseModel trait + list_models() + create_model() 工厂
   rnnoise.rs      # RNNoise 适配器（nnnoiseless crate）
-  deepfilter.rs   # DeepFilterNet3 适配器（tract-onnx + 3 个 ONNX 模型）
 ```
 
 - **统一接口**：`DenoiseModel` trait，480 samples/帧、48kHz、f32 输入输出
@@ -147,7 +145,7 @@ src-tauri/src/denoise/
 - **扩展方式**：新建 `denoise/xxx.rs` + 实现 trait + 在 `mod.rs` 注册即可
 
 待集成模型路线：
-1. **自训模型** — DNS Challenge 数据集 + PyTorch 训练 → ONNX 导出 → tract 推理
+1. **自训模型** — DNS Challenge 数据集 + PyTorch 训练 FullSubNet+ → ONNX 导出 → Rust ort 原生推理（训练环境已搭建，数据下载中）
 
 ## 关键踩坑记录
 

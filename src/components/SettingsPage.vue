@@ -10,27 +10,30 @@ import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
 const { t } = useI18n()
-const { saveSettings, registerHotkey, unregisterHotkey } = useSettings()
+const { saveSettings, registerHotkey } = useSettings()
 const { theme, setTheme } = useTheme()
 
 // 暂存的配置
 const localConfig = ref({
-  selectedInput: '',
-  selectedOutput: '',
   selectedModel: 'RNNoise',
-  monitorEnabled: false,
   hotkey: 'Ctrl+Shift+D',
   hotkeyEnabled: true,
+  hotkeyExplode: '',
+  hotkeyExplodeEnabled: false,
+  hotkeyMonitor: '',
+  hotkeyMonitorEnabled: false,
+  hotkeyBgm: '',
+  hotkeyBgmEnabled: false,
+  hotkeyEq: '',
+  hotkeyEqEnabled: false,
   autostart: false,
   language: 'zh-CN',
 })
 
 // 选项数据
-const inputDevices = ref<string[]>([])
-const outputDevices = ref<string[]>([])
 const availableModels = ref<string[]>([])
 
-const recording = ref(false)
+const recording = ref<string | null>(null) // 当前正在录制的快捷键名称
 const hotkeyError = ref('')
 const saving = ref(false)
 
@@ -45,44 +48,104 @@ const formatKey = (e: KeyboardEvent): string => {
   if (e.altKey) parts.push('Alt')
   if (e.metaKey) parts.push('Super')
   const key = e.key
+  const code = e.code
   if (!['Control', 'Shift', 'Alt', 'Meta'].includes(key)) {
     if (key === ' ') parts.push('Space')
+    else if (code === 'Numpad0') parts.push('Numpad0')
+    else if (code === 'Numpad1') parts.push('Numpad1')
+    else if (code === 'Numpad2') parts.push('Numpad2')
+    else if (code === 'Numpad3') parts.push('Numpad3')
+    else if (code === 'Numpad4') parts.push('Numpad4')
+    else if (code === 'Numpad5') parts.push('Numpad5')
+    else if (code === 'Numpad6') parts.push('Numpad6')
+    else if (code === 'Numpad7') parts.push('Numpad7')
+    else if (code === 'Numpad8') parts.push('Numpad8')
+    else if (code === 'Numpad9') parts.push('Numpad9')
+    else if (code === 'NumpadAdd') parts.push('Add')
+    else if (code === 'NumpadSubtract') parts.push('Subtract')
+    else if (code === 'NumpadMultiply') parts.push('Multiply')
+    else if (code === 'NumpadDivide') parts.push('Divide')
+    else if (code === 'NumpadDecimal') parts.push('Decimal')
+    else if (code === 'NumpadEnter') parts.push('Enter')
     else if (key.length === 1) parts.push(key.toUpperCase())
     else parts.push(key)
   }
   return parts.join('+')
 }
 
-const startRecording = () => {
-  recording.value = true
+const startRecording = (hotkeyName: string) => {
+  recording.value = hotkeyName
   hotkeyError.value = ''
   recordedKeys = []
   keydownHandler = (e: KeyboardEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    // Escape 重置快捷键
+    if (e.key === 'Escape') {
+      resetHotkey(hotkeyName)
+      return
+    }
     recordedKeys = [formatKey(e)]
   }
   keyupHandler = (e: KeyboardEvent) => {
     e.preventDefault()
     e.stopPropagation()
     if (recordedKeys.length > 0) {
-      const hasModifier = recordedKeys[0].includes('Ctrl') ||
-        recordedKeys[0].includes('Shift') ||
-        recordedKeys[0].includes('Alt') ||
-        recordedKeys[0].includes('Super')
-      if (hasModifier) {
-        localConfig.value.hotkey = recordedKeys[0]
-        recording.value = false
-        stopRecording()
-      } else {
-        hotkeyError.value = t('settings.modifierError')
-        recording.value = false
-        stopRecording()
+      const key = recordedKeys[0]
+      switch (hotkeyName) {
+        case 'hotkey':
+          localConfig.value.hotkey = key
+          break
+        case 'hotkeyExplode':
+          localConfig.value.hotkeyExplode = key
+          localConfig.value.hotkeyExplodeEnabled = true
+          break
+        case 'hotkeyMonitor':
+          localConfig.value.hotkeyMonitor = key
+          localConfig.value.hotkeyMonitorEnabled = true
+          break
+        case 'hotkeyBgm':
+          localConfig.value.hotkeyBgm = key
+          localConfig.value.hotkeyBgmEnabled = true
+          break
+        case 'hotkeyEq':
+          localConfig.value.hotkeyEq = key
+          localConfig.value.hotkeyEqEnabled = true
+          break
       }
+      recording.value = null
+      stopRecording()
     }
   }
   window.addEventListener('keydown', keydownHandler, true)
   window.addEventListener('keyup', keyupHandler, true)
+}
+
+const resetHotkey = (hotkeyName: string) => {
+  switch (hotkeyName) {
+    case 'hotkey':
+      localConfig.value.hotkey = 'Ctrl+Shift+D'
+      localConfig.value.hotkeyEnabled = true
+      break
+    case 'hotkeyExplode':
+      localConfig.value.hotkeyExplode = ''
+      localConfig.value.hotkeyExplodeEnabled = false
+      break
+    case 'hotkeyMonitor':
+      localConfig.value.hotkeyMonitor = ''
+      localConfig.value.hotkeyMonitorEnabled = false
+      break
+    case 'hotkeyBgm':
+      localConfig.value.hotkeyBgm = ''
+      localConfig.value.hotkeyBgmEnabled = false
+      break
+    case 'hotkeyEq':
+      localConfig.value.hotkeyEq = ''
+      localConfig.value.hotkeyEqEnabled = false
+      break
+  }
+  recording.value = null
+  stopRecording()
 }
 
 const stopRecording = () => {
@@ -94,7 +157,7 @@ const stopRecording = () => {
     window.removeEventListener('keyup', keyupHandler, true)
     keyupHandler = null
   }
-  recording.value = false
+  recording.value = null
 }
 
 // 接收主窗口发来的当前配置
@@ -114,16 +177,19 @@ onMounted(async () => {
 
   unlistenInit = await listen<any>('settings-init', (event) => {
     const p = event.payload
-    localConfig.value.selectedInput = p.selectedInput || ''
-    localConfig.value.selectedOutput = p.selectedOutput || ''
     localConfig.value.selectedModel = p.selectedModel || 'RNNoise'
-    localConfig.value.monitorEnabled = p.monitorEnabled || false
     localConfig.value.hotkey = p.hotkey || 'Ctrl+Shift+D'
     localConfig.value.hotkeyEnabled = p.hotkeyEnabled ?? true
+    localConfig.value.hotkeyExplode = p.hotkeyExplode || ''
+    localConfig.value.hotkeyExplodeEnabled = p.hotkeyExplodeEnabled ?? false
+    localConfig.value.hotkeyMonitor = p.hotkeyMonitor || ''
+    localConfig.value.hotkeyMonitorEnabled = p.hotkeyMonitorEnabled ?? false
+    localConfig.value.hotkeyBgm = p.hotkeyBgm || ''
+    localConfig.value.hotkeyBgmEnabled = p.hotkeyBgmEnabled ?? false
+    localConfig.value.hotkeyEq = p.hotkeyEq || ''
+    localConfig.value.hotkeyEqEnabled = p.hotkeyEqEnabled ?? false
     localConfig.value.autostart = p.autostart || false
     localConfig.value.language = p.language || 'zh-CN'
-    inputDevices.value = p.inputDevices || []
-    outputDevices.value = p.outputDevices || []
     availableModels.value = p.availableModels || []
     // 同步语言到 i18n（窗口复用时更新界面语言）
     if (p.language) {
@@ -145,11 +211,19 @@ const handleSave = async () => {
   saving.value = true
   hotkeyError.value = ''
 
-  // 1. 保存后端设置（hotkey/autostart）
+  // 1. 保存后端设置
   try {
     await saveSettings({
       hotkey: localConfig.value.hotkey,
       hotkeyEnabled: localConfig.value.hotkeyEnabled,
+      hotkeyExplode: localConfig.value.hotkeyExplode,
+      hotkeyExplodeEnabled: localConfig.value.hotkeyExplodeEnabled,
+      hotkeyMonitor: localConfig.value.hotkeyMonitor,
+      hotkeyMonitorEnabled: localConfig.value.hotkeyMonitorEnabled,
+      hotkeyBgm: localConfig.value.hotkeyBgm,
+      hotkeyBgmEnabled: localConfig.value.hotkeyBgmEnabled,
+      hotkeyEq: localConfig.value.hotkeyEq,
+      hotkeyEqEnabled: localConfig.value.hotkeyEqEnabled,
       autostart: localConfig.value.autostart,
       language: localConfig.value.language,
     })
@@ -159,13 +233,15 @@ const handleSave = async () => {
     return
   }
 
-  // 2. 注册/注销快捷键
+  // 2. 注册快捷键
   try {
-    if (localConfig.value.hotkeyEnabled) {
-      await registerHotkey(localConfig.value.hotkey)
-    } else {
-      await unregisterHotkey()
-    }
+    await registerHotkey(
+      localConfig.value.hotkeyEnabled ? localConfig.value.hotkey : '',
+      localConfig.value.hotkeyExplodeEnabled ? localConfig.value.hotkeyExplode : '',
+      localConfig.value.hotkeyMonitorEnabled ? localConfig.value.hotkeyMonitor : '',
+      localConfig.value.hotkeyBgmEnabled ? localConfig.value.hotkeyBgm : '',
+      localConfig.value.hotkeyEqEnabled ? localConfig.value.hotkeyEq : '',
+    )
   } catch (e) {
     hotkeyError.value = t('settings.hotkeyError')
   }
@@ -173,16 +249,18 @@ const handleSave = async () => {
   // 3. 语言存 localStorage（主窗口下次启动时读取）
   localStorage.setItem('meowmic-lang', localConfig.value.language)
 
-  // 4. 设备/模型变更存 localStorage，主窗口轮询检测
+  // 4. 模型变更存 localStorage，主窗口轮询检测
   localStorage.setItem('meowmic-pending', JSON.stringify({
-    selectedInput: localConfig.value.selectedInput,
-    selectedOutput: localConfig.value.selectedOutput,
     selectedModel: localConfig.value.selectedModel,
-    monitorEnabled: localConfig.value.monitorEnabled,
     applyAt: Date.now(),
   }))
 
   saving.value = false
+  // 通知主窗口重新读取设置
+  try {
+    const { emit } = await import('@tauri-apps/api/event')
+    await emit('settings-saved')
+  } catch {}
   getCurrentWindow().hide()
 }
 
@@ -192,7 +270,12 @@ watch(() => localConfig.value.language, (lang) => {
   localStorage.setItem('meowmic-lang', lang)
 })
 
-const handleClose = () => {
+const handleClose = async () => {
+  // 通知主窗口重新读取设置
+  try {
+    const { emit } = await import('@tauri-apps/api/event')
+    await emit('settings-saved')
+  } catch {}
   getCurrentWindow().hide()
 }
 </script>
@@ -204,33 +287,6 @@ const handleClose = () => {
     </div>
 
     <div class="settings-body">
-      <!-- 设备选择 -->
-      <section class="section">
-        <h2>{{ t('settings.audioDevices') }}</h2>
-
-        <div class="form-group">
-          <label class="form-label">{{ t('device.input') }}</label>
-          <div class="select-wrapper">
-            <select v-model="localConfig.selectedInput">
-              <option value="" disabled>{{ t('device.selectInput') }}</option>
-              <option v-for="d in inputDevices" :key="d" :value="d">{{ d }}</option>
-            </select>
-            <span class="select-arrow"></span>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">{{ t('device.output') }}</label>
-          <div class="select-wrapper">
-            <select v-model="localConfig.selectedOutput">
-              <option value="" disabled>{{ t('device.selectOutput') }}</option>
-              <option v-for="d in outputDevices" :key="d" :value="d">{{ d }}</option>
-            </select>
-            <span class="select-arrow"></span>
-          </div>
-        </div>
-      </section>
-
       <!-- 降噪模型 -->
       <section class="section">
         <h2>{{ t('denoise.model') }}</h2>
@@ -244,48 +300,152 @@ const handleClose = () => {
         </div>
       </section>
 
-      <!-- 监听 -->
-      <section class="section">
-        <h2>{{ t('denoise.monitor') }}</h2>
-        <div class="setting-row">
-          <span class="setting-label">{{ t('denoise.monitorDesc') }}</span>
-          <button
-            class="toggle"
-            :class="{ active: localConfig.monitorEnabled }"
-            @click="localConfig.monitorEnabled = !localConfig.monitorEnabled"
-          >
-            <span class="toggle-knob"></span>
-          </button>
-        </div>
-      </section>
-
       <!-- 快捷键 -->
       <section class="section">
         <h2>{{ t('settings.hotkey') }}</h2>
-        <div class="setting-row">
-          <span class="setting-label">{{ t('settings.hotkeyDesc') }}</span>
-          <button
-            class="toggle"
-            :class="{ active: localConfig.hotkeyEnabled }"
-            @click="localConfig.hotkeyEnabled = !localConfig.hotkeyEnabled"
-          >
-            <span class="toggle-knob"></span>
-          </button>
-        </div>
-        <div class="hotkey-section">
-          <div class="hotkey-display">
-            <span v-if="!recording" class="hotkey-value">{{ localConfig.hotkey }}</span>
-            <span v-else class="hotkey-recording">{{ t('settings.hotkeyRecording') }}</span>
+
+        <!-- 开关降噪 -->
+        <div class="hotkey-row">
+          <div class="hotkey-info">
+            <span class="hotkey-label">{{ t('settings.hotkeyDenoise') }}</span>
+            <span class="hotkey-value">{{ localConfig.hotkey || t('settings.hotkeyDefault') }}</span>
           </div>
-          <button
-            class="record-btn"
-            :class="{ recording }"
-            @click="recording ? stopRecording() : startRecording()"
-          >
-            {{ recording ? t('settings.cancel') : t('settings.record') }}
-          </button>
+          <div class="hotkey-actions">
+            <button
+              class="toggle small"
+              :class="{ active: localConfig.hotkeyEnabled }"
+              @click="localConfig.hotkeyEnabled = !localConfig.hotkeyEnabled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+            <button
+              class="reset-btn"
+              @click="resetHotkey('hotkey')"
+            >{{ t('settings.reset') }}</button>
+            <button
+              class="record-btn"
+              :class="{ recording: recording === 'hotkey' }"
+              @click="recording === 'hotkey' ? stopRecording() : startRecording('hotkey')"
+            >
+              {{ recording === 'hotkey' ? t('settings.cancel') : t('settings.record') }}
+            </button>
+          </div>
         </div>
+
+        <!-- 开关EQ -->
+        <div class="hotkey-row">
+          <div class="hotkey-info">
+            <span class="hotkey-label">{{ t('settings.hotkeyEq') }}</span>
+            <span class="hotkey-value">{{ localConfig.hotkeyEq || t('settings.hotkeyDefault') }}</span>
+          </div>
+          <div class="hotkey-actions">
+            <button
+              class="toggle small"
+              :class="{ active: localConfig.hotkeyEqEnabled }"
+              @click="localConfig.hotkeyEqEnabled = !localConfig.hotkeyEqEnabled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+            <button
+              class="reset-btn"
+              @click="resetHotkey('hotkeyEq')"
+            >{{ t('settings.reset') }}</button>
+            <button
+              class="record-btn"
+              :class="{ recording: recording === 'hotkeyEq' }"
+              @click="recording === 'hotkeyEq' ? stopRecording() : startRecording('hotkeyEq')"
+            >
+              {{ recording === 'hotkeyEq' ? t('settings.cancel') : t('settings.record') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 开关BGM -->
+        <div class="hotkey-row">
+          <div class="hotkey-info">
+            <span class="hotkey-label">{{ t('settings.hotkeyBgm') }}</span>
+            <span class="hotkey-value">{{ localConfig.hotkeyBgm || t('settings.hotkeyDefault') }}</span>
+          </div>
+          <div class="hotkey-actions">
+            <button
+              class="toggle small"
+              :class="{ active: localConfig.hotkeyBgmEnabled }"
+              @click="localConfig.hotkeyBgmEnabled = !localConfig.hotkeyBgmEnabled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+            <button
+              class="reset-btn"
+              @click="resetHotkey('hotkeyBgm')"
+            >{{ t('settings.reset') }}</button>
+            <button
+              class="record-btn"
+              :class="{ recording: recording === 'hotkeyBgm' }"
+              @click="recording === 'hotkeyBgm' ? stopRecording() : startRecording('hotkeyBgm')"
+            >
+              {{ recording === 'hotkeyBgm' ? t('settings.cancel') : t('settings.record') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 开关炸麦 -->
+        <div class="hotkey-row">
+          <div class="hotkey-info">
+            <span class="hotkey-label">{{ t('settings.hotkeyExplode') }}</span>
+            <span class="hotkey-value">{{ localConfig.hotkeyExplode || t('settings.hotkeyDefault') }}</span>
+          </div>
+          <div class="hotkey-actions">
+            <button
+              class="toggle small"
+              :class="{ active: localConfig.hotkeyExplodeEnabled }"
+              @click="localConfig.hotkeyExplodeEnabled = !localConfig.hotkeyExplodeEnabled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+            <button
+              class="reset-btn"
+              @click="resetHotkey('hotkeyExplode')"
+            >{{ t('settings.reset') }}</button>
+            <button
+              class="record-btn"
+              :class="{ recording: recording === 'hotkeyExplode' }"
+              @click="recording === 'hotkeyExplode' ? stopRecording() : startRecording('hotkeyExplode')"
+            >
+              {{ recording === 'hotkeyExplode' ? t('settings.cancel') : t('settings.record') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 开关监听 -->
+        <div class="hotkey-row">
+          <div class="hotkey-info">
+            <span class="hotkey-label">{{ t('settings.hotkeyMonitor') }}</span>
+            <span class="hotkey-value">{{ localConfig.hotkeyMonitor || t('settings.hotkeyDefault') }}</span>
+          </div>
+          <div class="hotkey-actions">
+            <button
+              class="toggle small"
+              :class="{ active: localConfig.hotkeyMonitorEnabled }"
+              @click="localConfig.hotkeyMonitorEnabled = !localConfig.hotkeyMonitorEnabled"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+            <button
+              class="reset-btn"
+              @click="resetHotkey('hotkeyMonitor')"
+            >{{ t('settings.reset') }}</button>
+            <button
+              class="record-btn"
+              :class="{ recording: recording === 'hotkeyMonitor' }"
+              @click="recording === 'hotkeyMonitor' ? stopRecording() : startRecording('hotkeyMonitor')"
+            >
+              {{ recording === 'hotkeyMonitor' ? t('settings.cancel') : t('settings.record') }}
+            </button>
+          </div>
+        </div>
+
         <p v-if="hotkeyError" class="hotkey-error">{{ hotkeyError }}</p>
+        <p class="hotkey-hint">{{ t('settings.hotkeyHint') }}</p>
       </section>
 
       <!-- 开机自启 -->
@@ -524,6 +684,80 @@ html, body {
 
 .toggle.active .toggle-knob {
   transform: translateX(20px);
+}
+
+.toggle.small {
+  width: 36px;
+  height: 20px;
+}
+
+.toggle.small .toggle-knob {
+  width: 16px;
+  height: 16px;
+}
+
+.toggle.small.active .toggle-knob {
+  transform: translateX(16px);
+}
+
+/* Reset button */
+.reset-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.reset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Hotkey rows */
+.hotkey-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.hotkey-row:last-child {
+  border-bottom: none;
+}
+
+.hotkey-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hotkey-label {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.hotkey-value {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.hotkey-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hotkey-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
 }
 
 /* Hotkey */

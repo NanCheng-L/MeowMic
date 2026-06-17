@@ -30,3 +30,10 @@ tauri.key
 *.njsproj
 *.sln
 *.sw?
+
+# Test files
+test_audio/
+test_output/
+
+# Training
+training/

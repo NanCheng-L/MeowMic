@@ -1026,53 +1026,60 @@ fn audio_loop(
 
     // 监听使用系统默认输出设备（和 OBS 一样），不需要用户手动选择
     // 但如果默认输出与输入是同一 USB 设备，则跳过（会导致同设备冲突）
-    if let Ok(monitor_output) = find_device(None, false) {
-        let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
-        let monitor_output_id = monitor_output.get_id().unwrap_or_default();
-        let input_device_id = input_device.get_id().unwrap_or_default();
+    debug_log("Monitor: looking for default output device...");
+    match find_device(None, false) {
+        Ok(monitor_output) => {
+            let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
+            let monitor_output_id = monitor_output.get_id().unwrap_or_default();
+            let input_device_id = input_device.get_id().unwrap_or_default();
+            debug_log(&format!("Monitor: default output = '{}', id = '{}'", monitor_output_name, monitor_output_id));
+            debug_log(&format!("Monitor: input device id = '{}'", input_device_id));
 
-        // 检测同设备：USB 设备 ID 包含 VID/PID，同一物理设备的输入输出共享
-        // 例如: \\?\usb#vid_1234&pid_5678&... 和 \\?\usb#vid_1234&pid_5678&...
-        let extract_usb_id = |id: &str| -> String {
-            if let Some(start) = id.find("vid_") {
-                let rest = &id[start..];
-                if let Some(end) = rest.find('&') {
-                    if let Some(pid_start) = rest.find("pid_") {
-                        let pid_rest = &rest[pid_start..];
-                        if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
-                            return rest[..end + pid_end].to_string();
+            let extract_usb_id = |id: &str| -> String {
+                if let Some(start) = id.find("vid_") {
+                    let rest = &id[start..];
+                    if let Some(end) = rest.find('&') {
+                        if let Some(pid_start) = rest.find("pid_") {
+                            let pid_rest = &rest[pid_start..];
+                            if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
+                                return rest[..end + pid_end].to_string();
+                            }
                         }
                     }
                 }
-            }
-            String::new()
-        };
-        let monitor_usb = extract_usb_id(&monitor_output_id);
-        let input_usb = extract_usb_id(&input_device_id);
-        let same_device = !monitor_usb.is_empty() && monitor_usb == input_usb;
+                String::new()
+            };
+            let monitor_usb = extract_usb_id(&monitor_output_id);
+            let input_usb = extract_usb_id(&input_device_id);
+            let same_device = !monitor_usb.is_empty() && monitor_usb == input_usb;
+            debug_log(&format!("Monitor: monitor_usb='{}', input_usb='{}', same_device={}", monitor_usb, input_usb, same_device));
 
-        if same_device {
-            log::warn!("Monitor skipped: default output '{}' shares USB ID '{}' with input '{}'", monitor_output_name, monitor_usb, input_friendly);
-        } else if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
-            let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
-            if m_client.initialize_client(
-                &monitor_format,
-                def_time,
-                &Direction::Render,
-                &ShareMode::Shared,
-                true,
-            ).is_ok()
-            {
-                if let Ok(render) = m_client.get_audiorenderclient() {
-                    let evt = m_client.set_get_eventhandle();
-                    // 不在这里 start_stream，由主循环按 monitor_enabled 控制启停
-                    // 避免默认输出与输入是同一 USB 设备时无条件开启导致干扰
-                    log::info!("Monitor client ready on default output: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
-                    monitor_render_opt = Some(render);
-                    monitor_event_opt = evt.ok();
-                    monitor_client_opt = Some(m_client);
+            if same_device {
+                log::warn!("Monitor skipped: default output '{}' shares USB ID '{}' with input '{}'", monitor_output_name, monitor_usb, input_friendly);
+                debug_log("Monitor: SKIPPED - same device conflict");
+            } else if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
+                let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
+                if m_client.initialize_client(
+                    &monitor_format,
+                    def_time,
+                    &Direction::Render,
+                    &ShareMode::Shared,
+                    true,
+                ).is_ok()
+                {
+                    if let Ok(render) = m_client.get_audiorenderclient() {
+                        let evt = m_client.set_get_eventhandle();
+                        log::info!("Monitor client ready on default output: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
+                        debug_log(&format!("Monitor: READY on '{}'", monitor_output_name));
+                        monitor_render_opt = Some(render);
+                        monitor_event_opt = evt.ok();
+                        monitor_client_opt = Some(m_client);
+                    }
                 }
             }
+        }
+        Err(e) => {
+            debug_log(&format!("Monitor: failed to find default output device: {}", e));
         }
     }
 
@@ -1242,7 +1249,10 @@ fn audio_loop(
 
                     let mut output_frame = input_frame;
                     if current_config.enabled {
+                        let denoise_start = std::time::Instant::now();
                         denoise.process_frame(&mut output_frame, &input_frame);
+                        let _denoise_ms = denoise_start.elapsed().as_micros() as f32 / 1000.0;
+
                         // 防止 denoise 模型输出 NaN/Inf 穿透链路
                         for s in output_frame.iter_mut() {
                             if !s.is_finite() {
