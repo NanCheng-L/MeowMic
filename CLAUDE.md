@@ -140,6 +140,9 @@ pnpm tauri signer generate -w tauri.key
 - 公钥填入 `tauri.conf.json` 的 `plugins.updater.pubkey`
 - 私钥文件 `tauri.key` 不要提交到 git
 
+- **WASAPI 监听设备自动跟随**：监听使用系统默认输出设备，但 WASAPI 客户端在创建时绑定设备，不会自动跟随系统默认设备变更。需要每秒检查 `find_device(None, false)` 的 ID 是否变化，变化时停止旧客户端、重新初始化新客户端。闭包捕获的变量（`monitor_format`、`input_device_id`）必须在闭包定义前提取为独立变量
+- **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
+
 ## 红线
 
 - 密钥、token、密码不进代码

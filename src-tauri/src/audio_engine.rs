@@ -1023,60 +1023,70 @@ fn audio_loop(
     // 监听缓冲区：考虑重采样后可能变大（最高 192kHz → 4x）
     let monitor_max_frames = frame_size * (output_sample_rate as usize / 48000 + 1);
     let mut monitor_buffer = vec![0u8; monitor_max_frames * 2 * 2]; // stereo i16
+    let mut current_monitor_device_id = String::new();
 
-    // 监听使用系统默认输出设备（和 OBS 一样），不需要用户手动选择
-    // 但如果默认输出与输入是同一 USB 设备，则跳过（会导致同设备冲突）
+    // 辅助闭包：初始化监听客户端到指定设备
+    let input_device_id_for_monitor = input_device.get_id().unwrap_or_default();
+    let init_monitor_client = |device: &Device, client_opt: &mut Option<AudioClient>, render_opt: &mut Option<AudioRenderClient>, event_opt: &mut Option<wasapi::Handle>, device_id_out: &mut String| -> bool {
+        let device_id = device.get_id().unwrap_or_default();
+        let device_name = device.get_friendlyname().unwrap_or_default();
+
+        // 检查同 USB 设备冲突
+        let extract_usb_id = |id: &str| -> String {
+            if let Some(start) = id.find("vid_") {
+                let rest = &id[start..];
+                if let Some(end) = rest.find('&') {
+                    if let Some(pid_start) = rest.find("pid_") {
+                        let pid_rest = &rest[pid_start..];
+                        if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
+                            return rest[..end + pid_end].to_string();
+                        }
+                    }
+                }
+            }
+            String::new()
+        };
+        let monitor_usb = extract_usb_id(&device_id);
+        let input_usb = extract_usb_id(&input_device_id_for_monitor);
+        if !monitor_usb.is_empty() && monitor_usb == input_usb {
+            log::warn!("Monitor skipped: device '{}' shares USB ID with input", device_name);
+            debug_log(&format!("Monitor: SKIPPED - '{}' same USB device as input", device_name));
+            return false;
+        }
+
+        if let Ok(mut m_client) = device.get_iaudioclient() {
+            let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
+            if m_client.initialize_client(
+                &monitor_format,
+                def_time,
+                &Direction::Render,
+                &ShareMode::Shared,
+                true,
+            ).is_ok() {
+                if let Ok(render) = m_client.get_audiorenderclient() {
+                    let evt = m_client.set_get_eventhandle();
+                    log::info!("Monitor client ready on '{}' (format: 16bit int, {}Hz)", device_name, output_sample_rate);
+                    debug_log(&format!("Monitor: READY on '{}'", device_name));
+                    *client_opt = Some(m_client);
+                    *render_opt = Some(render);
+                    *event_opt = evt.ok();
+                    *device_id_out = device_id;
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    // 初始化监听：系统默认输出设备
     debug_log("Monitor: looking for default output device...");
     match find_device(None, false) {
         Ok(monitor_output) => {
             let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
-            let monitor_output_id = monitor_output.get_id().unwrap_or_default();
-            let input_device_id = input_device.get_id().unwrap_or_default();
-            debug_log(&format!("Monitor: default output = '{}', id = '{}'", monitor_output_name, monitor_output_id));
-            debug_log(&format!("Monitor: input device id = '{}'", input_device_id));
-
-            let extract_usb_id = |id: &str| -> String {
-                if let Some(start) = id.find("vid_") {
-                    let rest = &id[start..];
-                    if let Some(end) = rest.find('&') {
-                        if let Some(pid_start) = rest.find("pid_") {
-                            let pid_rest = &rest[pid_start..];
-                            if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
-                                return rest[..end + pid_end].to_string();
-                            }
-                        }
-                    }
-                }
-                String::new()
-            };
-            let monitor_usb = extract_usb_id(&monitor_output_id);
-            let input_usb = extract_usb_id(&input_device_id);
-            let same_device = !monitor_usb.is_empty() && monitor_usb == input_usb;
-            debug_log(&format!("Monitor: monitor_usb='{}', input_usb='{}', same_device={}", monitor_usb, input_usb, same_device));
-
-            if same_device {
-                log::warn!("Monitor skipped: default output '{}' shares USB ID '{}' with input '{}'", monitor_output_name, monitor_usb, input_friendly);
-                debug_log("Monitor: SKIPPED - same device conflict");
-            } else if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
-                let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
-                if m_client.initialize_client(
-                    &monitor_format,
-                    def_time,
-                    &Direction::Render,
-                    &ShareMode::Shared,
-                    true,
-                ).is_ok()
-                {
-                    if let Ok(render) = m_client.get_audiorenderclient() {
-                        let evt = m_client.set_get_eventhandle();
-                        log::info!("Monitor client ready on default output: {} (format: 16bit int, {}Hz)", monitor_output_name, output_sample_rate);
-                        debug_log(&format!("Monitor: READY on '{}'", monitor_output_name));
-                        monitor_render_opt = Some(render);
-                        monitor_event_opt = evt.ok();
-                        monitor_client_opt = Some(m_client);
-                    }
-                }
-            }
+            debug_log(&format!("Monitor: default output = '{}'", monitor_output_name));
+            init_monitor_client(
+                &monitor_output, &mut monitor_client_opt, &mut monitor_render_opt, &mut monitor_event_opt, &mut current_monitor_device_id
+            );
         }
         Err(e) => {
             debug_log(&format!("Monitor: failed to find default output device: {}", e));
@@ -1521,6 +1531,32 @@ fn audio_loop(
                             post_eq_peak, post_bgm_peak, output_peak,
                             mic_gain, current_eq.enabled, bgm_running.load(Ordering::Relaxed)
                         ));
+                    }
+
+                    // ====== 监听设备变更检测：每秒检查系统默认输出是否改变 ======
+                    if frame_count % 480 == 0 {
+                        if let Ok(new_default) = find_device(None, false) {
+                            let new_id = new_default.get_id().unwrap_or_default();
+                            if new_id != current_monitor_device_id && !new_id.is_empty() {
+                                debug_log(&format!("Monitor: default output changed from '{}' to '{}'", current_monitor_device_id, new_id));
+                                // 先停止旧流
+                                let was_streaming = monitor_was_streaming;
+                                if was_streaming {
+                                    if let Some(client) = monitor_client_opt.take() {
+                                        let _ = client.stop_stream();
+                                    }
+                                    monitor_was_streaming = false;
+                                } else if let Some(client) = monitor_client_opt.take() {
+                                    drop(client);
+                                }
+                                // 重新初始化
+                                if init_monitor_client(
+                                    &new_default, &mut monitor_client_opt, &mut monitor_render_opt, &mut monitor_event_opt, &mut current_monitor_device_id
+                                ) {
+                                    log::info!("Monitor switched to new default output device");
+                                }
+                            }
+                        }
                     }
                     // 异常告警：任一阶段峰值超过安全阈值，立即记录
                     let alarm = post_gain_peak > 24000.0 || post_eq_peak > 24000.0

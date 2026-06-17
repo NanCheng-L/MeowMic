@@ -64,11 +64,11 @@ onUnmounted(() => {
             <strong>{{ t('tutorial.exampleMeowmic') }}</strong>
           </div>
           <div class="example-row">
-            <span class="example-label">输入设备：</span>
+            <span class="example-label">{{ t('tutorial.exampleInputLabel') }}</span>
             <span class="example-value">麦克风 (Realtek(R) Audio)</span>
           </div>
           <div class="example-row">
-            <span class="example-label">输出设备：</span>
+            <span class="example-label">{{ t('tutorial.exampleOutputLabel') }}</span>
             <span class="example-value highlight">CABLE Input (VB-Audio Virtual Cable)</span>
           </div>
         </div>
@@ -79,8 +79,20 @@ onUnmounted(() => {
             <strong>{{ t('tutorial.exampleApp') }}</strong>
           </div>
           <div class="example-row">
-            <span class="example-label">音频输入设备：</span>
+            <span class="example-label">{{ t('tutorial.exampleAppInputLabel') }}</span>
             <span class="example-value highlight">CABLE Output (VB-Audio Virtual Cable)</span>
+          </div>
+        </div>
+
+        <div class="example-box">
+          <div class="example-header">
+            <span class="example-icon">🔊</span>
+            <strong>{{ t('tutorial.systemOutputTitle') }}</strong>
+          </div>
+          <p class="example-desc">{{ t('tutorial.systemOutputDesc') }}</p>
+          <div class="example-row">
+            <span class="example-label">{{ t('tutorial.exampleOutputLabel') }}</span>
+            <span class="example-value">耳机 (Realtek(R) Audio)</span>
           </div>
         </div>
 
@@ -309,6 +321,13 @@ onUnmounted(() => {
 
 .example-icon {
   font-size: 18px;
+}
+
+.example-desc {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
 }
 
 .example-row {
