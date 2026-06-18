@@ -17,12 +17,7 @@
         "height": 680,
         "resizable": true,
         "maximized": false,
-        "visible": false,
-        "transparent": true,
-        "windowEffects": {
-          "effects": ["acrylic"],
-          "color": "#0a0a0a"
-        }
+        "visible": false
       }
     ],
     "security": {
