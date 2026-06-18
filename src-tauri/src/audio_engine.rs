@@ -224,9 +224,22 @@ impl AudioEngine {
     }
 
     /// 内部停止，不加锁（供 start() 内部调用，避免死锁）
+    /// 停止 BGM 线程但不设置 bgm_was_active（内部重启不应污染恢复标记）
     fn stop_inner(&self) {
         self.running.store(false, Ordering::Release);
-        self.stop_bgm();
+        // 停止 BGM 线程（不设置 bgm_was_active）
+        {
+            let stop = self.bgm_thread_running.lock().clone();
+            stop.store(false, Ordering::Release);
+        }
+        self.bgm_running.store(false, Ordering::Release);
+        let old_handle = self.bgm_thread_handle.lock().unwrap().take();
+        if let Some(h) = old_handle {
+            std::thread::Builder::new()
+                .name("bgm-cleanup".into())
+                .spawn(move || { let _ = h.join(); })
+                .ok();
+        }
         // 等待音频线程退出，避免旧流残留导致回音
         if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             let _ = handle.join();

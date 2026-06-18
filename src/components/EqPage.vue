@@ -611,6 +611,8 @@ onMounted(async () => {
     enabled.value = event.payload.enabled
     if (event.payload.preset) {
       activePreset.value = event.payload.preset
+      // 切换预设时恢复默认频率位置
+      frequencies.value = [...DEFAULT_FREQUENCIES]
       // 从预设列表加载 bands 并重绘曲线
       if (event.payload.preset === 'custom') {
         const savedBands = localStorage.getItem('meowmic-eq-bands')
@@ -650,6 +652,7 @@ const handleStorage = (e: StorageEvent) => {
 
 onUnmounted(() => {
   clearTimeout(pinTimer!)
+  if (syncTimer) clearTimeout(syncTimer)
   if (langPollingTimer) clearInterval(langPollingTimer)
   window.removeEventListener('storage', handleStorage)
   resizeObserver?.disconnect()

@@ -126,7 +126,7 @@ let unlistenEq: (() => void) | null = null
 let unlistenExplode: (() => void) | null = null
 let unlistenMonitor: (() => void) | null = null
 let unlistenBgm: (() => void) | null = null
-let unlistenBgmToggle: (() => void) | null = null
+let unlistenEqToggle: (() => void) | null = null
 let unlistenSettingsSaved: (() => void) | null = null
 let unlistenSettingsRequest: (() => void) | null = null
 let unlistenRestartNeeded: (() => void) | null = null
@@ -530,7 +530,7 @@ onMounted(async () => {
   })
 
   // 监听 EQ 快捷键
-  unlistenBgmToggle = await listen('toggle-eq', async () => {
+  unlistenEqToggle = await listen('toggle-eq', async () => {
     const next = !eqEnabled.value
     await handleEqEnabledChange(next)
   })
@@ -652,7 +652,7 @@ onUnmounted(() => {
   unlistenExplode?.()
   unlistenMonitor?.()
   unlistenBgm?.()
-  unlistenBgmToggle?.()
+  unlistenEqToggle?.()
   unlistenSettingsSaved?.()
   unlistenSettingsRequest?.()
   unlistenRestartNeeded?.()
