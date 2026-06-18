@@ -127,6 +127,10 @@ scripts/                # 构建/发布辅助脚本
 - **f32::clamp NaN panic**：`f32::clamp()` 遇到 NaN 会 panic。`update_bgm_config` 等接收前端浮点值的函数必须先 `is_finite()` 检查再 clamp，或用 `.max().min()` 替代
 - **SettingsPage 快捷键录制 listener 泄漏**：`startRecording()` 必须先调 `stopRecording()` 清理旧 handler，否则切换录制目标时旧 `window.addEventListener` 的回调无法移除，每次按键都会触发过期闭包
 - **SettingsPage 快捷键注册失败不隐藏窗口**：`handleSave` 中 `registerHotkey` 抛异常后必须 `return`，不能继续执行 `getCurrentWindow().hide()`，否则用户看不到错误提示
+- **EqPage 自身 emit 事件循环**：Tauri `emit` 会分发到所有窗口（包括发送方）。EqPage.vue 监听 `eq-changed` 时，自身发出的事件也会被处理，导致拖拽频率位置时被重置回默认值。解决：用 `isSelfEmitting` 标记，emit 前后设置，监听器开头检查跳过
+- **BGM buffer 无条件 drain**：`audio_loop` 中消费 BGM 样本的 `bgm_buf.drain()` 必须在 `bgm_running` 为 true 时才执行。否则 BGM 关闭/重启期间，drain 会丢弃 channel 中残余的有效数据，导致 BGM 恢复时出现音频断裂
+- **Vue watcher 启动时序**：`onMounted` 中 `loadConfig()` 设置 ref 值会触发 watcher，但此时引擎可能尚未启动。watcher 中调用 `updateConfig()` 发送 invoke 到未运行的后端会产生未处理的 Promise rejection。必须加 `initialized` 守卫
+- **bgm_was_active 设置时机**：`bgm_was_active.store(true)` 必须在线程全部 spawn 成功后执行，不能在 spawn 前。否则任何 spawn 失败导致 `start_bgm` 返回 `Err` 后，标记残留为 true，下次引擎重启会反复尝试重启失败的 BGM
 
 ## 版本号管理
 
