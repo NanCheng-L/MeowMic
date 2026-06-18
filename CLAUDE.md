@@ -121,6 +121,12 @@ scripts/                # 构建/发布辅助脚本
 - **EQ 后缺少 NaN/Inf 检查**：Biquad IIR 滤波器在极端参数下可能输出 NaN/Inf，穿透 BGM 混音污染输出。必须在 EQ 处理后添加 `is_finite()` 检查
 - **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>1000）但降噪输出全零（<1）连续 10 帧时，重建模型并清除 `saved_model_states`。阈值不能太低（如 >100/3 帧），正常键盘鼠标声被正确降噪时会被误判为模型损坏
 - **Tauri 托盘左键点击**：`TrayIconBuilder` 默认左键也会弹右键菜单。用 `.show_menu_on_left_click(false)` 禁止左键弹菜单，配合 `.on_tray_icon_event` 处理左键单击打开主窗口
+- **BGM 自动恢复标记**：`bgm_was_active` 必须在 `start_bgm()` 中设为 `true`，在 `stop_bgm()` 中也设为 `true`（记录用户主动开启的状态），在 `cancel_bgm_auto_restart()` 中设为 `false`（用户手动停止 BGM）。`start()` 检查 `bgm_was_active.swap(false)` 后自动重启 BGM。如果 `start_bgm()` 不设置此标记，引擎重启后 BGM 永远不会恢复
+- **std::sync::Mutex 中毒防护**：`app_handle`、`thread_handle`、`bgm_thread_handle` 的 `.lock().unwrap()` 必须改为 `.lock().unwrap_or_else(|e| e.into_inner())`，与 `lifecycle_lock` 保持一致。否则任何线程 panic 持有锁后，所有后续 lock 调用都会 panic，导致级联崩溃
+- **BGM 目标进程退出后线程自退出**：`bgm_process_loop` 中 `capture.read_from_device()` 返回错误时，必须用连续错误计数器（≥10 次）break 退出循环，否则线程会以 1000 次/秒空转烧 CPU 直到引擎手动停止
+- **f32::clamp NaN panic**：`f32::clamp()` 遇到 NaN 会 panic。`update_bgm_config` 等接收前端浮点值的函数必须先 `is_finite()` 检查再 clamp，或用 `.max().min()` 替代
+- **SettingsPage 快捷键录制 listener 泄漏**：`startRecording()` 必须先调 `stopRecording()` 清理旧 handler，否则切换录制目标时旧 `window.addEventListener` 的回调无法移除，每次按键都会触发过期闭包
+- **SettingsPage 快捷键注册失败不隐藏窗口**：`handleSave` 中 `registerHotkey` 抛异常后必须 `return`，不能继续执行 `getCurrentWindow().hide()`，否则用户看不到错误提示
 
 ## 版本号管理
 

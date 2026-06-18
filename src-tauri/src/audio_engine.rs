@@ -129,7 +129,7 @@ impl AudioEngine {
     }
 
     pub fn set_app_handle(&self, handle: AppHandle) {
-        *self.app_handle.lock().unwrap() = Some(handle);
+        *self.app_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
     pub fn start(
@@ -173,7 +173,7 @@ impl AudioEngine {
         running.store(true, Ordering::Release);
 
         // 获取 AppHandle 用于 emit 事件
-        let app_handle = self.app_handle.lock().unwrap().clone();
+        let app_handle = self.app_handle.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         let handle = std::thread::spawn(move || {
             if let Err(e) = audio_loop(
@@ -201,7 +201,7 @@ impl AudioEngine {
         });
 
         // 存储线程句柄，stop() 时等待退出
-        *self.thread_handle.lock().unwrap() = Some(handle);
+        *self.thread_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 
         // 引擎重启后自动恢复 BGM（如果之前是激活的）
         if self.bgm_was_active.swap(false, Ordering::Acquire) {
@@ -233,7 +233,7 @@ impl AudioEngine {
             stop.store(false, Ordering::Release);
         }
         self.bgm_running.store(false, Ordering::Release);
-        let old_handle = self.bgm_thread_handle.lock().unwrap().take();
+        let old_handle = self.bgm_thread_handle.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = old_handle {
             std::thread::Builder::new()
                 .name("bgm-cleanup".into())
@@ -241,7 +241,7 @@ impl AudioEngine {
                 .ok();
         }
         // 等待音频线程退出，避免旧流残留导致回音
-        if let Some(handle) = self.thread_handle.lock().unwrap().take() {
+        if let Some(handle) = self.thread_handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = handle.join();
         }
     }
@@ -301,6 +301,8 @@ impl AudioEngine {
         let new_stop = Arc::new(AtomicBool::new(true));
         *self.bgm_thread_running.lock() = new_stop.clone();
         self.bgm_running.store(true, Ordering::Release);
+        // 记录 BGM 已激活，引擎重启后自动恢复
+        self.bgm_was_active.store(true, Ordering::Release);
         debug_log(&format!("start_bgm: spawning {} threads", pids.len()));
 
         // 为每个 PID 启动一个独立的 loopback 线程
@@ -334,7 +336,7 @@ impl AudioEngine {
             .map_err(|e| format!("Failed to spawn BGM manager: {}", e))?;
 
         // 旧句柄交给后台线程 join
-        let old_handle = self.bgm_thread_handle.lock().unwrap().replace(manager_handle);
+        let old_handle = self.bgm_thread_handle.lock().unwrap_or_else(|e| e.into_inner()).replace(manager_handle);
         if let Some(h) = old_handle {
             std::thread::Builder::new()
                 .name("bgm-cleanup".into())
@@ -360,7 +362,7 @@ impl AudioEngine {
         }
         self.bgm_running.store(false, Ordering::Release);
         // 将旧句柄交给后台线程 join（避免 detach 导致 WASAPI 资源泄漏）
-        let old_handle = self.bgm_thread_handle.lock().unwrap().take();
+        let old_handle = self.bgm_thread_handle.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(h) = old_handle {
             std::thread::Builder::new()
                 .name("bgm-cleanup".into())
@@ -377,7 +379,9 @@ impl AudioEngine {
 
     /// 更新 BGM 配置（增益等）
     pub fn update_bgm_config(&self, bgm_gain: f32) {
-        self.bgm_gain.store(bgm_gain.clamp(0.0, 10.0).to_bits(), Ordering::Release);
+        if bgm_gain.is_finite() {
+            self.bgm_gain.store(bgm_gain.max(0.0).min(10.0).to_bits(), Ordering::Release);
+        }
     }
 
     /// 设置爆炸模式
@@ -952,6 +956,7 @@ fn bgm_process_loop(
     debug_log(&format!("bgm_loop[{}]: stream started, entering main loop", pid));
 
     let mut frame_count: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
 
     while running.load(Ordering::Acquire) {
         if event_handle.wait_for_event(100).is_err() {
@@ -961,6 +966,7 @@ fn bgm_process_loop(
 
         match capture.read_from_device(&mut buffer) {
             Ok((frames_read, _flags)) => {
+                consecutive_errors = 0; // 重置错误计数
                 if frames_read == 0 {
                     continue;
                 }
@@ -1034,7 +1040,13 @@ fn bgm_process_loop(
                 }
             }
             Err(e) => {
-                log::warn!("Failed to read BGM: {}", e);
+                consecutive_errors += 1;
+                log::warn!("Failed to read BGM: {} (consecutive: {})", e, consecutive_errors);
+                if consecutive_errors >= 10 {
+                    log::warn!("BGM target process likely exited, stopping loopback for pid={}", pid);
+                    debug_log(&format!("bgm_loop[{}]: exiting after {} consecutive errors", pid, consecutive_errors));
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
         }

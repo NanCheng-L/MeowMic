@@ -6,7 +6,7 @@ import { useTheme } from '../composables/useTheme'
 import { availableLocales, setLocale } from '../locales'
 import UpdateChecker from './UpdateChecker.vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { listen } from '@tauri-apps/api/event'
+import { listen, emit } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
 const { t } = useI18n()
@@ -74,6 +74,7 @@ const formatKey = (e: KeyboardEvent): string => {
 }
 
 const startRecording = (hotkeyName: string) => {
+  stopRecording() // 先清理旧 listener，防止泄漏
   recording.value = hotkeyName
   hotkeyError.value = ''
   recordedKeys = []
@@ -195,7 +196,7 @@ onMounted(async () => {
       localConfig.value.hotkeyBgmEnabled = p.hotkeyBgmEnabled ?? false
       localConfig.value.hotkeyEq = p.hotkeyEq || ''
       localConfig.value.hotkeyEqEnabled = p.hotkeyEqEnabled ?? false
-      localConfig.value.autostart = p.autostart || false
+      localConfig.value.autostart = p.autostart ?? false
       localConfig.value.language = p.language || 'zh-CN'
       // 同步语言到 i18n（窗口复用时更新界面语言）
       if (p.language) {
@@ -212,8 +213,7 @@ onMounted(async () => {
 
   // 主动请求主窗口发送最新配置（替代 setTimeout 猜测）
   try {
-    const { emit: emitEvent } = await import('@tauri-apps/api/event')
-    await emitEvent('settings-request')
+    await emit('settings-request')
   } catch {}
 })
 
@@ -259,6 +259,8 @@ const handleSave = async () => {
     )
   } catch (e) {
     hotkeyError.value = t('settings.hotkeyError')
+    saving.value = false
+    return // 快捷键注册失败时不隐藏窗口，让用户看到错误
   }
 
   // 3. 语言存 localStorage（主窗口下次启动时读取）
@@ -273,7 +275,6 @@ const handleSave = async () => {
   saving.value = false
   // 通知主窗口重新读取设置
   try {
-    const { emit } = await import('@tauri-apps/api/event')
     await emit('settings-saved')
   } catch {}
   getCurrentWindow().hide()

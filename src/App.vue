@@ -385,7 +385,12 @@ const handleEqPresetChange = async (preset: string) => {
   // 自定义：从 localStorage 加载 bands（不覆盖）
   if (preset === 'custom') {
     const savedBands = localStorage.getItem('meowmic-eq-bands')
-    const bands = savedBands ? JSON.parse(savedBands) : new Array(10).fill(0)
+    let bands: number[]
+    try {
+      bands = savedBands ? JSON.parse(savedBands) : new Array(10).fill(0)
+    } catch {
+      bands = new Array(10).fill(0)
+    }
     await invoke('update_eq_config', { bands })
     await emit('eq-changed', { enabled: eqEnabled.value, preset })
     return
