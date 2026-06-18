@@ -1180,7 +1180,10 @@ fn audio_loop(
     debug_log("Entering main audio loop");
 
     let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];
-    let mut output_buffer = vec![0u8; frame_size * output_bytes_per_frame];
+    // 输出缓冲区：按最大可能的重采样膨胀分配（如 96kHz 输出时翻倍）
+    let max_output_ratio = (output_sample_rate as f64 / 48000.0).ceil() as usize;
+    let max_output_frames = frame_size * max_output_ratio;
+    let mut output_buffer = vec![0u8; max_output_frames * output_bytes_per_frame];
     let mut frame_count: u64 = 0;
 
     // 输入累积缓冲：非 48kHz 设备需要重采样，这里累积 mono f32 样本
@@ -1346,6 +1349,12 @@ fn audio_loop(
                         let mut frame = mixed_samples;
                         eq_processor.apply_config(&current_eq);
                         eq_processor.process_frame(&mut frame);
+                        // EQ biquad 滤波器在极端参数下可能输出 NaN/Inf
+                        for s in frame.iter_mut() {
+                            if !s.is_finite() {
+                                *s = 0.0;
+                            }
+                        }
                         frame
                     } else {
                         mixed_samples
@@ -1427,6 +1436,11 @@ fn audio_loop(
                         bgm_buf.clear();
                     }
 
+                    // 每秒记录 BGM 缓冲区状态，诊断漂移
+                    if frame_count % 480 == 0 && bgm_running.load(Ordering::Relaxed) {
+                        debug_log(&format!("BGM buf level: {} samples ({:.1}ms)", bgm_buf.len(), bgm_buf.len() as f64 / 48000.0 * 1000.0));
+                    }
+
                     // ====== 诊断：BGM 混音后峰值 ======
                     let post_bgm_peak = final_samples.iter()
                         .map(|s| s.abs()).fold(0.0f32, f32::max);
@@ -1504,11 +1518,9 @@ fn audio_loop(
                         }
                     }
 
-                    // 检查输出缓冲区是否有空间，避免阻塞（同一 USB 设备时钟同步会死锁）
-                    // 共享模式下缓冲区通常是 10ms，留 2 帧余量
-                    let output_padding = output_client.get_current_padding().unwrap_or(0);
-                    let max_padding = (output_sample_rate / 100) * 2; // 20ms 余量
-                    if output_padding < max_padding {
+                    // 始终写入输出设备，让 WASAPI 处理缓冲区背压
+                    // 写入失败时仅记录警告，不跳过帧（跳过会导致可听到的卡顿）
+                    if out_bytes <= output_buffer.len() {
                         if let Err(e) = output_render.write_to_device(
                             out_frames,
                             &output_buffer[..out_bytes],
