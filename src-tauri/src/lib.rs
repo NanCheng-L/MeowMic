@@ -481,6 +481,13 @@ pub fn run() {
             install_vb_cable,
         ])
         .setup(move |app| {
+            // 设置 AppHandle 到 AudioEngine，用于 emit 事件
+            {
+                let state = app.state::<EngineState>();
+                let engine = state.engine.lock();
+                engine.set_app_handle(app.handle().clone());
+            }
+
             // 开机自启动时隐藏窗口，手动启动时显示
             if !is_hidden {
                 if let Some(window) = app.get_webview_window("main") {

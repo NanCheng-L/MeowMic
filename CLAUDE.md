@@ -103,16 +103,18 @@ scripts/                # 构建/发布辅助脚本
 - **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏
 - **Realtek 内置声卡同名设备不是同一设备**："麦克风 (Realtek(R) Audio)" 和 "扬声器 (Realtek(R) Audio)" 共享型号名但物理端点不同，不会导致 WASAPI 死锁。same-device 检测只针对 USB 设备（正则 `/usb|cable/i`）
 - **Azure Blob Storage 不支持断点续传**：`curl -C -` 失败，下载必须一次性完成或重新开始。DNS Challenge 数据从 `dns4public.blob.core.windows.net` 下载无 resume 支持
-- **输出到扬声器导致电流麦（回声反馈）**：降噪音频 → 扬声器播放 → 麦克风拾取 → 再次降噪 → 循环产生嗡嗡声。必须使用 VB-Cable 虚拟声卡作为输出设备
+- **输出到扬声器导致电流麦（回声反馈）**：降噪音频 → 扬声器播放 → 麦克风拾取 → 再次降噪 → 循环产生嗡嗡声。必须使用 VB-Cable 虚拟声卡作为输出设备。监听设备变更时会自动触发完整引擎重启（emit `restart-needed` 事件 → 前端 `scheduleRestart`），确保 RNNoise 模型和 EQ 状态被重置
 - **WASAPI 监听同设备检测**：监听使用系统默认输出设备（`find_device(None, false)`），可能与输入是同一 USB 物理设备（如 K7 麦克风 + K7 耳机）。通过提取设备 ID 中的 USB VID/PID 比较，相同则跳过监听初始化，避免共享 USB 时钟导致的电流麦干扰
 - **监听点启动同步**：`monitor_point` 后端默认为 0（关闭），前端 localStorage 保存的值需在引擎启动后调用 `setMonitor_point` 同步，否则监听不生效。需在 `handleStart` 和 HMR 热重载恢复路径中都同步
 - **监听点必须在处理阶段之前**：监听点写入必须放在对应处理阶段**之前**（如点 2 在增益前、点 3 在增益后），否则所有点读到的是同一个变量（已被后续阶段覆盖）。常见错误：把所有监听点放在处理链路末尾
 - **设置窗口模型列表兜底**：设置窗口首次打开时，`settings-init` 事件可能因窗口未加载完而丢失。需在 `onMounted` 中直接调用 `list_denoise_models` 兜底加载
-- **WASAPI 监听设备自动跟随**：监听使用系统默认输出设备，但 WASAPI 客户端在创建时绑定设备，不会自动跟随系统默认设备变更。需要每秒检查 `find_device(None, false)` 的 ID 是否变化，变化时停止旧客户端、重新初始化新客户端。闭包捕获的变量（`monitor_format`、`input_device_id`）必须在闭包定义前提取为独立变量
+- **WASAPI 监听设备自动跟随**：监听使用系统默认输出设备，但 WASAPI 客户端在创建时绑定设备，不会自动跟随系统默认设备变更。需要每秒检查 `find_device(None, false)` 的 ID 是否变化，变化时 emit `restart-needed` 事件触发完整引擎重启（跟切换输入设备一样），确保 RNNoise 模型和 EQ 状态被重置
 - **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
 - **WASAPI 输出缓冲区溢出**：`output_buffer` 按 `frame_size * output_bytes_per_frame` 分配，但重采样后 `out_frames` 可能膨胀（如输出设备 96kHz 时翻倍）。必须按 `frame_size * (output_sample_rate / 48000).ceil()` 分配最大可能的缓冲区大小
 - **WASAPI 输出 padding 跳帧**：当缓冲区 > 20ms 时跳过写入会导致可听到的卡顿。应始终写入，让 WASAPI 处理背压。跳过帧 = 音频间隙 = 卡麦
 - **EQ 后缺少 NaN/Inf 检查**：Biquad IIR 滤波器在极端参数下可能输出 NaN/Inf，穿透 BGM 混音污染输出。必须在 EQ 处理后添加 `is_finite()` 检查
+- **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>100）但降噪输出全零（<1）连续 3 帧时，重建模型并清除 `saved_model_states`
+- **Tauri 托盘左键点击**：`TrayIconBuilder` 默认左键也会弹右键菜单。用 `.show_menu_on_left_click(false)` 禁止左键弹菜单，配合 `.on_tray_icon_event` 处理左键单击打开主窗口
 
 ## 版本号管理
 

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 use wasapi::*;
 
 /// 写入调试日志到文件（打包后可用）
@@ -88,6 +89,8 @@ pub struct AudioEngine {
     bgm_thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 模型内部状态（归一化统计等），按模型名分别保存
     model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// AppHandle 用于 emit 事件通知前端
+    app_handle: std::sync::Mutex<Option<AppHandle>>,
 }
 
 impl AudioEngine {
@@ -109,7 +112,12 @@ impl AudioEngine {
             thread_handle: std::sync::Mutex::new(None),
             bgm_thread_handle: std::sync::Mutex::new(None),
             model_states: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            app_handle: std::sync::Mutex::new(None),
         }
+    }
+
+    pub fn set_app_handle(&self, handle: AppHandle) {
+        *self.app_handle.lock().unwrap() = Some(handle);
     }
 
     pub fn start(
@@ -120,8 +128,12 @@ impl AudioEngine {
         resource_dir: Option<std::path::PathBuf>,
         monitor_enabled_init: bool,
     ) -> Result<(), String> {
+        // 如果引擎正在运行，先停止并等待清理完成
         if self.running.load(Ordering::Relaxed) {
-            return Err("Engine is already running".to_string());
+            debug_log("Engine restart: stopping current engine first");
+            self.stop();
+            // 等待一小段时间确保资源完全释放
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         // 模型在音频线程内加载（避免阻塞主线程）
@@ -146,6 +158,9 @@ impl AudioEngine {
 
         running.store(true, Ordering::Relaxed);
 
+        // 获取 AppHandle 用于 emit 事件
+        let app_handle = self.app_handle.lock().unwrap().clone();
+
         let handle = std::thread::spawn(move || {
             if let Err(e) = audio_loop(
                 running,
@@ -164,6 +179,7 @@ impl AudioEngine {
                 monitor_enabled,
                 monitor_point,
                 model_states,
+                app_handle,
             ) {
                 log::error!("Audio engine error: {}", e);
             }
@@ -916,6 +932,7 @@ fn audio_loop(
     monitor_enabled: Arc<AtomicBool>,
     monitor_point: Arc<AtomicU32>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    app_handle: Option<AppHandle>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
     debug_log("=== audio_loop started ===");
@@ -1192,6 +1209,7 @@ fn audio_loop(
     // BGM 缓冲：立体声 i16 样本队列
     let mut bgm_buf: Vec<i16> = Vec::new();
     let mut monitor_was_streaming = false; // 流未在初始化时启动，由主循环控制
+    let mut consecutive_zero_output: u32 = 0; // 模型损坏检测计数器
 
     let mut loop_iteration: u64 = 0;
     let mut consecutive_zero_reads: u32 = 0;
@@ -1271,6 +1289,33 @@ fn audio_loop(
                             if !s.is_finite() {
                                 *s = 0.0;
                             }
+                        }
+
+                        // 检测模型是否被回声打废：输入有信号但降噪输出全零
+                        let input_peak = input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                        let output_peak = output_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                        if input_peak > 100.0 && output_peak < 1.0 {
+                            consecutive_zero_output += 1;
+                            if consecutive_zero_output >= 3 {
+                                log::warn!("Denoise model corrupted (in={:.0}, out={:.0}), rebuilding", input_peak, output_peak);
+                                denoise = denoise::create_model(
+                                    model_name.as_deref().unwrap_or("RNNoise"),
+                                    resource_dir.as_deref()
+                                );
+                                eq_processor = EqProcessor::new(48000);
+                                let eq_cfg = eq_config.read().clone();
+                                if eq_cfg.enabled {
+                                    eq_processor.apply_config(&eq_cfg);
+                                }
+                                input_acc.clear();
+                                // 清除保存的模型状态，防止损坏状态被重新加载
+                                if let Ok(mut states) = saved_model_states.lock() {
+                                    states.clear();
+                                }
+                                consecutive_zero_output = 0;
+                            }
+                        } else {
+                            consecutive_zero_output = 0;
                         }
                     }
 
@@ -1550,23 +1595,15 @@ fn audio_loop(
                         if let Ok(new_default) = find_device(None, false) {
                             let new_id = new_default.get_id().unwrap_or_default();
                             if new_id != current_monitor_device_id && !new_id.is_empty() {
-                                debug_log(&format!("Monitor: default output changed from '{}' to '{}'", current_monitor_device_id, new_id));
-                                // 先停止旧流
-                                let was_streaming = monitor_was_streaming;
-                                if was_streaming {
-                                    if let Some(client) = monitor_client_opt.take() {
-                                        let _ = client.stop_stream();
-                                    }
-                                    monitor_was_streaming = false;
-                                } else if let Some(client) = monitor_client_opt.take() {
-                                    drop(client);
+                                let new_name = new_default.get_friendlyname().unwrap_or_default();
+                                log::info!("Monitor device changed: '{}' -> '{}', restarting engine", current_monitor_device_id, new_name);
+                                debug_log(&format!("Monitor: device changed to '{}', triggering full restart", new_name));
+                                // 通知前端重启引擎
+                                if let Some(ref handle) = app_handle {
+                                    let _ = handle.emit("restart-needed", ());
                                 }
-                                // 重新初始化
-                                if init_monitor_client(
-                                    &new_default, &mut monitor_client_opt, &mut monitor_render_opt, &mut monitor_event_opt, &mut current_monitor_device_id
-                                ) {
-                                    log::info!("Monitor switched to new default output device");
-                                }
+                                running.store(false, Ordering::Relaxed);
+                                return Ok(());
                             }
                         }
                     }

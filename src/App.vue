@@ -553,6 +553,12 @@ onMounted(async () => {
     } catch {}
   })
 
+  // 监听引擎重启请求（监听设备变更时触发）
+  await listen('restart-needed', () => {
+    console.log('Engine restart requested (monitor device changed)')
+    scheduleRestart(100)
+  })
+
   // 监听设备热拔插事件（防抖：快速插拔只触发一次重启）
   unlistenDevices = await listen<{
     input_devices: string[]
