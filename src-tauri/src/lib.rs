@@ -12,6 +12,7 @@ use std::str::FromStr;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
+    window::{Color, Effect, EffectsBuilder},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
@@ -435,6 +436,22 @@ fn list_denoise_models() -> Vec<&'static str> {
     denoise::list_models()
 }
 
+#[tauri::command]
+fn set_window_theme(app: AppHandle, theme: String) {
+    if let Some(window) = app.get_webview_window("main") {
+        let color = if theme == "light" {
+            Color(245, 237, 228, 200) // #F5EDE4 with alpha
+        } else {
+            Color(10, 10, 10, 200) // #0a0a0a with alpha
+        };
+        let effects = EffectsBuilder::new()
+            .effect(Effect::Acrylic)
+            .color(color)
+            .build();
+        let _ = window.set_effects(effects);
+    }
+}
+
 pub fn run() {
     env_logger::init();
 
@@ -479,6 +496,7 @@ pub fn run() {
             get_eq_frequencies,
             list_denoise_models,
             install_vb_cable,
+            set_window_theme,
         ])
         .setup(move |app| {
             // 开机自启动时隐藏窗口，手动启动时显示

@@ -1,4 +1,5 @@
 import { ref, watchEffect, onMounted, onUnmounted } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 
 type Theme = 'dark' | 'light'
 
@@ -14,6 +15,8 @@ function applyTheme(t: Theme) {
   } else {
     delete root.dataset.theme
   }
+  // 同步更新窗口标题栏 Acrylic 效果颜色
+  invoke('set_window_theme', { theme: t }).catch(() => {})
 }
 
 // 初始化：立即应用
