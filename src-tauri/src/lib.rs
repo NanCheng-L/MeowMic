@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::str::FromStr;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::TrayIconBuilder,
+    tray::{TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
@@ -519,6 +519,15 @@ pub fn run() {
                         std::process::exit(0);
                     }
                     _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
                 })
                 .build(app)?;
 
