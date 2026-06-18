@@ -301,8 +301,6 @@ impl AudioEngine {
         let new_stop = Arc::new(AtomicBool::new(true));
         *self.bgm_thread_running.lock() = new_stop.clone();
         self.bgm_running.store(true, Ordering::Release);
-        // 记录 BGM 已激活，引擎重启后自动恢复
-        self.bgm_was_active.store(true, Ordering::Release);
         debug_log(&format!("start_bgm: spawning {} threads", pids.len()));
 
         // 为每个 PID 启动一个独立的 loopback 线程
@@ -344,6 +342,8 @@ impl AudioEngine {
                 .ok();
         }
         debug_log("start_bgm: done");
+        // 线程全部启动成功后才标记，失败时不会残留 true
+        self.bgm_was_active.store(true, Ordering::Release);
 
         Ok(())
     }
@@ -1648,12 +1648,14 @@ fn audio_loop(
                         mixed_samples
                     };
 
-                    // 消费已使用的 BGM 样本
-                    let used = final_samples.len() * 2;
-                    if used <= bgm_buf.len() {
-                        bgm_buf.drain(..used);
-                    } else {
-                        bgm_buf.clear();
+                    // 消费已使用的 BGM 样本（仅在 BGM 运行时 drain，否则保留数据）
+                    if bgm_running.load(Ordering::Acquire) {
+                        let used = final_samples.len() * 2;
+                        if used <= bgm_buf.len() {
+                            bgm_buf.drain(..used);
+                        } else {
+                            bgm_buf.clear();
+                        }
                     }
 
                     // 每秒记录 BGM 缓冲区状态，诊断漂移

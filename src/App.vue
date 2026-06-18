@@ -131,6 +131,7 @@ let unlistenSettingsSaved: (() => void) | null = null
 let unlistenSettingsRequest: (() => void) | null = null
 let unlistenRestartNeeded: (() => void) | null = null
 let pollingTimer: ReturnType<typeof setInterval> | null = null
+let conflictRetryTimer: ReturnType<typeof setTimeout> | null = null
 let initialized = false
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let conflictRetries = 0
@@ -264,7 +265,7 @@ const handleStart = async () => {
         selectedOutput.value = altOutput
         saveConfig()
         // 重新尝试启动
-        setTimeout(() => handleStart(), 500)
+        conflictRetryTimer = setTimeout(() => { conflictRetryTimer = null; handleStart() }, 500)
       } else {
         conflictRetries = 0
       }
@@ -471,7 +472,8 @@ const handleApplySettings = async (payload: {
 }
 
 watch([denoiseEnabled, denoiseStrength], () => {
-  updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value })
+  if (!initialized) return // 启动加载时不触发，避免引擎未就绪时调用
+  updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value }).catch(() => {})
   saveConfig()
 })
 
@@ -662,6 +664,7 @@ onUnmounted(() => {
   unlistenSettingsRequest?.()
   unlistenRestartNeeded?.()
   if (restartTimer) clearTimeout(restartTimer)
+  if (conflictRetryTimer) clearTimeout(conflictRetryTimer)
   if (pollingTimer) clearInterval(pollingTimer)
   if (isRunning.value) {
     stopDenoising().catch(console.error)

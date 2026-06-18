@@ -41,6 +41,8 @@ let canvasW = 0
 let canvasH = 0
 let draggingBand = -1
 let hoverBand = -1
+// 标记是否正在本地 emit eq-changed，避免监听器处理自身发出的事件
+let isSelfEmitting = false
 
 // 悬停/弹窗（统一）
 const hoverVisible = ref(false)
@@ -163,7 +165,9 @@ const applyPreset = (name: string) => {
     activePreset.value = name
     localStorage.setItem('meowmic-eq-preset', name)
     syncToBackend()
+    isSelfEmitting = true
     emit('eq-changed', { enabled: enabled.value, preset: name })
+    isSelfEmitting = false
     draw()
     return
   }
@@ -173,7 +177,9 @@ const applyPreset = (name: string) => {
     activePreset.value = name
     localStorage.setItem('meowmic-eq-preset', name)
     syncToBackend()
+    isSelfEmitting = true
     emit('eq-changed', { enabled: enabled.value, preset: name })
+    isSelfEmitting = false
     draw()
   }
 }
@@ -181,7 +187,9 @@ const applyPreset = (name: string) => {
 const handleToggle = async () => {
   enabled.value = !enabled.value
   syncToBackend()
+  isSelfEmitting = true
   await emit('eq-changed', { enabled: enabled.value, preset: activePreset.value })
+  isSelfEmitting = false
   draw()
 }
 
@@ -206,7 +214,9 @@ const handleReset = () => {
   localStorage.setItem('meowmic-eq-preset', 'custom')
   localStorage.setItem('meowmic-eq-bands', JSON.stringify(bands.value))
   syncToBackend()
+  isSelfEmitting = true
   emit('eq-changed', { enabled: enabled.value, preset: 'custom' })
+  isSelfEmitting = false
   draw()
 }
 
@@ -503,7 +513,9 @@ const handleMouseMove = (e: MouseEvent) => {
     localStorage.setItem('meowmic-eq-preset', 'custom')
     localStorage.setItem('meowmic-eq-bands', JSON.stringify(bands.value))
     syncToBackend()
+    isSelfEmitting = true
     emit('eq-changed', { enabled: enabled.value, preset: 'custom' })
+    isSelfEmitting = false
     hoverBandIdx.value = draggingBand
     hoverVisible.value = true
     draw()
@@ -608,6 +620,8 @@ onMounted(async () => {
   }
 
   unlisten = await listen<{ enabled: boolean; preset?: string }>('eq-changed', (event) => {
+    // 跳过自身发出的事件，避免拖拽频率被重置回默认值
+    if (isSelfEmitting) return
     enabled.value = event.payload.enabled
     if (event.payload.preset) {
       activePreset.value = event.payload.preset
