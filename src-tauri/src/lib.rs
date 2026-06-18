@@ -507,6 +507,7 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -525,6 +526,7 @@ pub fn run() {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
