@@ -25,9 +25,10 @@ const getThemeColors = () => {
 }
 
 const enabled = ref(false)
+const DEFAULT_FREQUENCIES = [20, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000]
 const bands = ref<number[]>(new Array(10).fill(0))
 const activePreset = ref('custom')
-const frequencies = ref<number[]>([20, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000])
+const frequencies = ref<number[]>([...DEFAULT_FREQUENCIES])
 const presets = ref<[string, number[]][]>([])
 
 const PRESET_KEYS = ['custom', 'clear', 'warm', 'broadcast', 'bass-boost', 'treble-boost', 'podcast'] as const
@@ -148,6 +149,9 @@ const loadPresets = async () => {
 }
 
 const applyPreset = (name: string) => {
+  // 切换预设时恢复默认频率位置（水平拖拽修改过的频率需要重置）
+  frequencies.value = [...DEFAULT_FREQUENCIES]
+
   // 'custom'：从 localStorage 恢复，不覆盖
   if (name === 'custom') {
     const savedBands = localStorage.getItem('meowmic-eq-bands')
@@ -458,6 +462,7 @@ function getCanvasPos(e: MouseEvent): { x: number; y: number } {
 
 let dragMoved = false
 let pinTimer: ReturnType<typeof setTimeout> | null = null
+let langPollingTimer: ReturnType<typeof setInterval> | null = null
 
 function startPinTimer() {
   clearTimeout(pinTimer!)
@@ -625,7 +630,7 @@ onMounted(async () => {
   })
 
   // 轮询同步语言变化
-  setInterval(() => {
+  langPollingTimer = setInterval(() => {
     const lang = localStorage.getItem('meowmic-lang')
     if (lang) setLocale(lang)
   }, 1000)
@@ -645,6 +650,7 @@ const handleStorage = (e: StorageEvent) => {
 
 onUnmounted(() => {
   clearTimeout(pinTimer!)
+  if (langPollingTimer) clearInterval(langPollingTimer)
   window.removeEventListener('storage', handleStorage)
   resizeObserver?.disconnect()
   unlisten?.()

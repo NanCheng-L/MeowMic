@@ -96,6 +96,8 @@ pub struct AudioEngine {
     model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     /// AppHandle 用于 emit 事件通知前端
     app_handle: std::sync::Mutex<Option<AppHandle>>,
+    /// start/stop 生命周期互斥锁，防止并发调用导致双音频线程
+    lifecycle_lock: std::sync::Mutex<()>,
 }
 
 impl AudioEngine {
@@ -122,6 +124,7 @@ impl AudioEngine {
             bgm_thread_handle: std::sync::Mutex::new(None),
             model_states: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             app_handle: std::sync::Mutex::new(None),
+            lifecycle_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -137,12 +140,13 @@ impl AudioEngine {
         resource_dir: Option<std::path::PathBuf>,
         monitor_enabled_init: bool,
     ) -> Result<(), String> {
+        // 生命周期互斥锁：防止 start/stop 并发调用导致双音频线程
+        let _guard = self.lifecycle_lock.lock().unwrap_or_else(|e| e.into_inner());
+
         // 如果引擎正在运行，先停止并等待清理完成
         if self.running.load(Ordering::Relaxed) {
             debug_log("Engine restart: stopping current engine first");
-            self.stop();
-            // 等待一小段时间确保资源完全释放
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.stop_inner();
         }
 
         // 模型在音频线程内加载（避免阻塞主线程）
@@ -166,7 +170,7 @@ impl AudioEngine {
         // 同步初始监听状态
         self.monitor_enabled.store(monitor_enabled_init, Ordering::Relaxed);
 
-        running.store(true, Ordering::Relaxed);
+        running.store(true, Ordering::Release);
 
         // 获取 AppHandle 用于 emit 事件
         let app_handle = self.app_handle.lock().unwrap().clone();
@@ -215,7 +219,13 @@ impl AudioEngine {
     }
 
     pub fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
+        let _guard = self.lifecycle_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.stop_inner();
+    }
+
+    /// 内部停止，不加锁（供 start() 内部调用，避免死锁）
+    fn stop_inner(&self) {
+        self.running.store(false, Ordering::Release);
         self.stop_bgm();
         // 等待音频线程退出，避免旧流残留导致回音
         if let Some(handle) = self.thread_handle.lock().unwrap().take() {
@@ -1541,7 +1551,7 @@ fn audio_loop(
                     }
 
                     // ============ 💥 爆炸模式：方波失真 ============
-                    let mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
+                    let mut mixed_samples = if explode_enabled.load(Ordering::Relaxed) {
                         let intensity = explode_intensity.load(Ordering::Relaxed) as f32;
                         let mapped = 50.0 + intensity * 0.5;
                         let gain = 1.0 + (mapped / 100.0).powf(0.6) * 49.0;
@@ -1557,6 +1567,13 @@ fn audio_loop(
                     } else {
                         mixed_samples
                     };
+
+                    // 爆炸模式输出 NaN/Inf 检查（防止污染后续 BGM 混音）
+                    for sample in mixed_samples.iter_mut() {
+                        if !sample.is_finite() {
+                            *sample = 0.0;
+                        }
+                    }
 
                     // ============ BGM 混音 ============
                     let final_samples = if bgm_running.load(Ordering::Acquire) {
@@ -1735,7 +1752,13 @@ fn audio_loop(
                                 if let Some(ref handle) = app_handle {
                                     let _ = handle.emit("restart-needed", ());
                                 }
-                                running.store(false, Ordering::Relaxed);
+                                running.store(false, Ordering::Release);
+                                // 显式停止 WASAPI 流，避免残余音频播放
+                                input_client.stop_stream().ok();
+                                output_client.stop_stream().ok();
+                                if let Some(m_client) = monitor_client_opt {
+                                    m_client.stop_stream().ok();
+                                }
                                 return Ok(());
                             }
                         }

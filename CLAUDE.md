@@ -94,9 +94,13 @@ scripts/                # 构建/发布辅助脚本
 - **进程名获取不可靠**：FileDescription 对国产软件（网易云、抖音、QQ浏览器）通常返回英文或截断值，必须用 exe 名映射表兜底；窗口标题包含动态内容（歌名、场景名），需清理 " - " 后缀和版本号
 - **BGM 单进程限制**：WASAPI 共享模式下多个 `new_application_loopback_client` 同时运行会互相干扰（一个拿到静音），BGM 只能选择单个进程。每个 PID 启动独立 WASAPI loopback 线程，通过同一 channel 发送混音数据，用 manager 线程 join 所有子线程
 - **BGM start_bgm 不等待旧线程**：`start_bgm` 不能调 `stop_bgm().join()` 等旧线程退出，否则阻塞 Tauri 命令线程导致 UI 卡死。只 `bgm_running.store(false)` 标记停止，旧线程自行退出。`stop_bgm()` 的 join 逻辑仅在显式停止时使用
+- **WASAPI start/stop 并发安全**：`start()` 和 `stop()` 必须用 `lifecycle_lock`（`std::sync::Mutex`）互斥保护，防止设备热拔插 + 用户操作并发调用导致双音频线程竞争 WASAPI 设备。`start()` 内部调 `stop_inner()`（不加锁版本），避免死锁
+- **AtomicBool ordering**：`running` 标志在 `start()`/`stop()` 中必须用 `Ordering::Release` 存储，`audio_loop` 中用 `Ordering::Acquire` 加载。`Relaxed` 在 ARM64 上不保证及时可见性，可能导致停止信号延迟生效
+- **WASAPI 监听设备变更提前退出**：`audio_loop` 检测到监听设备变更后 `return Ok(())` 前，必须显式调用 `input_client.stop_stream()` / `output_client.stop_stream()`，否则 WASAPI 缓冲区残余音频会继续播放
 - **设备热拔插恢复**：`lastUserInput` 只在用户手动选设备和启动加载时更新，`devices-changed` 处理器绝不能覆盖；Vue watch 异步执行，不能用同步标志位区分用户/系统变更
 - **EQ loadEqConfig 加载顺序**：后端 `EqConfig` 在 engine 重启后 bands 恢复为全 0（default）。`loadEqConfig` 必须优先从 `localStorage('meowmic-eq-preset')` 读取预设名，用 `presets.find()` 获取正确的 bands 值，不能直接用后端返回的 bands——否则预设名正确但曲线平坦。同时 `loadPresets()` 必须在 `loadEqConfig()` 之前完成（不能用 `Promise.all`），否则 presets 数组为空
 - **EQ 跨窗口状态同步**：`loadEqConfig` 从 `localStorage('meowmic-config')` 读取 `eqEnabled` 并同步到后端，而非从后端读取（后端不持久化）。同时在 EqPage.vue 中监听 `eq-changed` Tauri 事件实时更新 toggle 状态
+- **EQ frequencies 拖拽恢复**：EqPage.vue 的 `frequencies` 数组（10 段频率位置）支持水平拖拽修改，但 `bands`（增益值）按索引对应频率。切预设时必须重置 `frequencies` 为默认值 `[20, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000]`，否则预设的 bands 增益会画在错误的频率位置上
 - **WASAPI IAudioSessionManager2**：枚举音频会话需要 `Win32_System_Com` + `Win32_Media_Audio` feature；活跃会话始终显示，非活跃会话仅保留映射表中的已知播放器（避免系统进程如 audiodg 出现）；同名进程按名称去重
 - **WASAPI 输出编码格式**：输出编码必须用**输出设备**的 format（`output_bits` / `output_sample_type`），不能用输入设备的。VB-Audio Cable 通常是 32-bit float，麦克风通常是 16-bit int，混用会导致字节错位产生破音
 - **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`

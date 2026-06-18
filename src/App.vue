@@ -123,8 +123,17 @@ const hasUpdate = ref(false)
 let unlistenToggle: (() => void) | null = null
 let unlistenDevices: (() => void) | null = null
 let unlistenEq: (() => void) | null = null
+let unlistenExplode: (() => void) | null = null
+let unlistenMonitor: (() => void) | null = null
+let unlistenBgm: (() => void) | null = null
+let unlistenBgmToggle: (() => void) | null = null
+let unlistenSettingsSaved: (() => void) | null = null
+let unlistenSettingsRequest: (() => void) | null = null
+let unlistenRestartNeeded: (() => void) | null = null
+let pollingTimer: ReturnType<typeof setInterval> | null = null
 let initialized = false
 let restartTimer: ReturnType<typeof setTimeout> | null = null
+let conflictRetries = 0
 let restarting = false
 let lastUserInput = '' // 记住用户最后选择的输入设备
 
@@ -225,6 +234,7 @@ const handleStart = async () => {
       monitorEnabled.value
     )
     isRunning.value = true
+    conflictRetries = 0
     // 启动后同步降噪开关状态到后端
     await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
     // 同步监听点到后端
@@ -247,13 +257,16 @@ const handleStart = async () => {
       // 输入输出是同一设备导致的死锁
       console.error('Device conflict: input and output are the same device')
       isRunning.value = false
-      // 自动切换到系统默认输出
-      if (outputDevices.value.length > 0) {
+      conflictRetries++
+      // 自动切换到系统默认输出，最多重试 3 次
+      if (conflictRetries <= 3 && outputDevices.value.length > 0) {
         const altOutput = outputDevices.value.find(d => d !== selectedInput.value) || outputDevices.value[0]
         selectedOutput.value = altOutput
         saveConfig()
         // 重新尝试启动
         setTimeout(() => handleStart(), 500)
+      } else {
+        conflictRetries = 0
       }
     } else {
       console.error('Failed to start denoising:', e)
@@ -494,7 +507,7 @@ onMounted(async () => {
   })
 
   // 监听炸麦快捷键
-  await listen('toggle-explode', async () => {
+  unlistenExplode = await listen('toggle-explode', async () => {
     const next = !explodeEnabled.value
     explodeEnabled.value = next
     try {
@@ -506,18 +519,18 @@ onMounted(async () => {
   })
 
   // 监听监听快捷键
-  await listen('toggle-monitor', async () => {
+  unlistenMonitor = await listen('toggle-monitor', async () => {
     const next = !monitorEnabled.value
     await handleMonitorChange(next)
   })
 
   // 监听 BGM 快捷键
-  await listen('toggle-bgm', () => {
+  unlistenBgm = await listen('toggle-bgm', () => {
     window.dispatchEvent(new CustomEvent('hotkey-toggle-bgm'))
   })
 
   // 监听 EQ 快捷键
-  await listen('toggle-eq', async () => {
+  unlistenBgmToggle = await listen('toggle-eq', async () => {
     const next = !eqEnabled.value
     await handleEqEnabledChange(next)
   })
@@ -533,14 +546,14 @@ onMounted(async () => {
   })
 
   // 监听设置窗口保存事件，重新读取后端设置
-  await listen('settings-saved', async () => {
+  unlistenSettingsSaved = await listen('settings-saved', async () => {
     try {
       await loadSettings()
     } catch {}
   })
 
   // 设置窗口挂载后主动请求配置，响应最新设置
-  await listen('settings-request', async () => {
+  unlistenSettingsRequest = await listen('settings-request', async () => {
     await emit('settings-init', {
       selectedInput: selectedInput.value,
       selectedOutput: selectedOutput.value,
@@ -566,7 +579,7 @@ onMounted(async () => {
   })
 
   // 监听引擎重启请求（监听设备变更时触发）
-  await listen('restart-needed', () => {
+  unlistenRestartNeeded = await listen('restart-needed', () => {
     console.log('Engine restart requested (monitor device changed)')
     scheduleRestart(100)
   })
@@ -616,7 +629,7 @@ onMounted(async () => {
   })
 
   // 轮询检测设置窗口的变更（localStorage 通信，避免跨窗口 emit 问题）
-  setInterval(() => {
+  pollingTimer = setInterval(() => {
     try {
       // 设备/模型等设置变更
       const raw = localStorage.getItem('meowmic-pending')
@@ -636,7 +649,15 @@ onUnmounted(() => {
   unlistenToggle?.()
   unlistenDevices?.()
   unlistenEq?.()
+  unlistenExplode?.()
+  unlistenMonitor?.()
+  unlistenBgm?.()
+  unlistenBgmToggle?.()
+  unlistenSettingsSaved?.()
+  unlistenSettingsRequest?.()
+  unlistenRestartNeeded?.()
   if (restartTimer) clearTimeout(restartTimer)
+  if (pollingTimer) clearInterval(pollingTimer)
   if (isRunning.value) {
     stopDenoising().catch(console.error)
   }
