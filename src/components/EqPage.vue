@@ -25,7 +25,7 @@ const getThemeColors = () => {
 }
 
 const enabled = ref(false)
-const DEFAULT_FREQUENCIES = [20, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000]
+const DEFAULT_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 const bands = ref<number[]>(new Array(10).fill(0))
 const activePreset = ref('custom')
 const frequencies = ref<number[]>([...DEFAULT_FREQUENCIES])
