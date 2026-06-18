@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 use wasapi::*;
 
 /// 写入调试日志到文件（打包后可用）
-fn debug_log(msg: &str) {
+pub fn debug_log(msg: &str) {
     use std::io::Write;
     let log_path = std::env::temp_dir().join("meowmic-debug.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
@@ -77,10 +77,13 @@ pub struct AudioEngine {
     config: Arc<RwLock<DenoiseConfig>>,
     eq_config: Arc<RwLock<EqConfig>>,
     stats: Arc<RwLock<AudioStats>>,
+    /// audio_loop 读取：BGM 是否激活（控制混音开关）
     bgm_running: Arc<AtomicBool>,
     bgm_config: Arc<RwLock<BgmConfig>>,
     bgm_sender: Sender<Vec<i16>>,
     bgm_receiver: Receiver<Vec<i16>>,
+    /// 每批 BGM 线程的独立停止标志，start_bgm 时替换（新旧线程用不同 Arc，互不干扰）
+    bgm_thread_running: parking_lot::Mutex<Arc<AtomicBool>>,
     explode_enabled: Arc<AtomicBool>,
     explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
@@ -95,7 +98,7 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn new() -> Self {
-        let (bgm_tx, bgm_rx) = bounded::<Vec<i16>>(2);
+        let (bgm_tx, bgm_rx) = bounded::<Vec<i16>>(32);
         Self {
             running: Arc::new(AtomicBool::new(false)),
             config: Arc::new(RwLock::new(DenoiseConfig::default())),
@@ -105,6 +108,7 @@ impl AudioEngine {
             bgm_config: Arc::new(RwLock::new(BgmConfig::default())),
             bgm_sender: bgm_tx,
             bgm_receiver: bgm_rx,
+            bgm_thread_running: parking_lot::Mutex::new(Arc::new(AtomicBool::new(false))),
             explode_enabled: Arc::new(AtomicBool::new(false)),
             explode_intensity: Arc::new(AtomicU32::new(50)),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
@@ -218,14 +222,26 @@ impl AudioEngine {
     }
 
     /// 启动 BGM 捕获线程（按进程 PID 列表，每个 PID 一个线程）
+    ///
+    /// 设计：每批线程持有独立的 `AtomicBool` 停止标志。`start_bgm` 不 join 旧线程
+    /// （避免阻塞 engine lock），只标记旧 flag 为 false 让其自行退出（~100ms 内
+    /// `wait_for_event` 超时后退出）。新线程使用新 flag，互不干扰。
     pub fn start_bgm(&self, pids: Vec<u32>) -> Result<(), String> {
-        // 先停旧线程（不等待退出，直接标记停止）
+        debug_log("start_bgm: begin");
+        // 1. 标记旧线程停止（不 join，让其自行退出，避免阻塞 engine lock）
+        {
+            let old_stop = self.bgm_thread_running.lock().clone();
+            old_stop.store(false, Ordering::Relaxed);
+            debug_log("start_bgm: old threads marked stop");
+        }
         self.bgm_running.store(false, Ordering::Relaxed);
         {
             let mut cfg = self.bgm_config.write();
             cfg.enabled = false;
         }
-        // 不 join 旧线程，让它自行退出，避免阻塞
+        // 清空 channel 残留数据
+        while self.bgm_receiver.try_recv().is_ok() {}
+        debug_log("start_bgm: channel drained");
 
         log::info!("start_bgm: pids={:?}", pids);
         let sender = self.bgm_sender.clone();
@@ -237,26 +253,33 @@ impl AudioEngine {
             cfg.enabled = true;
         }
 
-        let bgm_running = self.bgm_running.clone();
-        bgm_running.store(true, Ordering::Relaxed);
+        // 2. 创建新的独立停止标志给这批线程（旧线程持有旧 Arc，互不干扰）
+        let new_stop = Arc::new(AtomicBool::new(true));
+        *self.bgm_thread_running.lock() = new_stop.clone();
+        self.bgm_running.store(true, Ordering::Relaxed);
+        debug_log(&format!("start_bgm: spawning {} threads", pids.len()));
 
         // 为每个 PID 启动一个独立的 loopback 线程
         let mut handles = Vec::new();
         for pid in pids {
             let sender_clone = sender.clone();
-            let running_clone = bgm_running.clone();
+            let running_clone = new_stop.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("bgm-loopback-{}", pid))
                 .spawn(move || {
+                    debug_log(&format!("bgm-loopback-{}: thread started", pid));
                     if let Err(e) = bgm_process_loop(running_clone, sender_clone, pid) {
                         log::error!("BGM process loopback error for pid {}: {}", pid, e);
+                        debug_log(&format!("bgm-loopback-{}: ERROR {}", pid, e));
                     }
+                    debug_log(&format!("bgm-loopback-{}: thread exiting", pid));
                 })
                 .map_err(|e| format!("Failed to spawn BGM thread: {}", e))?;
             handles.push(handle);
+            debug_log(&format!("start_bgm: spawned thread for pid {}", pid));
         }
 
-        // 存储所有线程句柄，stop_bgm() 时 join
+        // manager 线程负责 join 所有子线程（不阻塞主流程，只用于清理泄漏的线程）
         let manager_handle = std::thread::Builder::new()
             .name("bgm-manager".into())
             .spawn(move || {
@@ -267,21 +290,29 @@ impl AudioEngine {
             .map_err(|e| format!("Failed to spawn BGM manager: {}", e))?;
 
         *self.bgm_thread_handle.lock().unwrap() = Some(manager_handle);
+        debug_log("start_bgm: done");
 
         Ok(())
     }
 
-    /// 停止 BGM 捕获
+    /// 停止 BGM 捕获（只标记停止，不 join，避免阻塞 engine lock）
     pub fn stop_bgm(&self) {
-        self.bgm_running.store(false, Ordering::Relaxed);
-        let mut cfg = self.bgm_config.write();
-        cfg.enabled = false;
-        drop(cfg);
-        // 等待 BGM 线程退出，清空残留数据
-        if let Some(handle) = self.bgm_thread_handle.lock().unwrap().take() {
-            let _ = handle.join();
+        debug_log("stop_bgm: begin");
+        {
+            let stop = self.bgm_thread_running.lock().clone();
+            stop.store(false, Ordering::Relaxed);
+            debug_log("stop_bgm: threads marked stop");
         }
+        self.bgm_running.store(false, Ordering::Relaxed);
+        {
+            let mut cfg = self.bgm_config.write();
+            cfg.enabled = false;
+        }
+        // 丢弃线程句柄，旧线程会在 ~100ms 内自行退出
+        *self.bgm_thread_handle.lock().unwrap() = None;
+        // 清空 channel 残留数据
         while self.bgm_receiver.try_recv().is_ok() {}
+        debug_log("stop_bgm: done");
     }
 
     /// 更新 BGM 配置（增益等）
@@ -804,8 +835,10 @@ fn bgm_process_loop(
     sender: Sender<Vec<i16>>,
     pid: u32,
 ) -> Result<(), String> {
+    debug_log(&format!("bgm_loop[{}]: initializing MTA", pid));
     let _ = initialize_mta().ok();
 
+    debug_log(&format!("bgm_loop[{}]: creating loopback client", pid));
     let mut client = AudioClient::new_application_loopback_client(pid, true)
         .map_err(|e| format!("Failed to create process loopback client: {}", e))?;
 
@@ -823,18 +856,22 @@ fn bgm_process_loop(
     );
 
     // 进程 loopback 不支持 get_periods()，用 0 让 WASAPI 用默认值
+    debug_log(&format!("bgm_loop[{}]: initializing client", pid));
     client
         .initialize_client(&format, 0, &Direction::Capture, &ShareMode::Shared, true)
         .map_err(|e| format!("Failed to initialize BGM client: {}", e))?;
 
+    debug_log(&format!("bgm_loop[{}]: setting event handle", pid));
     let event_handle = client
         .set_get_eventhandle()
         .map_err(|e| format!("Failed to set BGM event handle: {}", e))?;
 
+    debug_log(&format!("bgm_loop[{}]: getting capture client", pid));
     let capture = client
         .get_audiocaptureclient()
         .map_err(|e| format!("Failed to get BGM capture client: {}", e))?;
 
+    debug_log(&format!("bgm_loop[{}]: starting stream", pid));
     client
         .start_stream()
         .map_err(|e| format!("Failed to start BGM stream: {}", e))?;
@@ -843,6 +880,7 @@ fn bgm_process_loop(
     let mut buffer = vec![0u8; frame_size * bytes_per_frame];
 
     log::info!("BGM process loopback started for pid={}", pid);
+    debug_log(&format!("bgm_loop[{}]: stream started, entering main loop", pid));
 
     let mut frame_count: u64 = 0;
 
@@ -900,11 +938,30 @@ fn bgm_process_loop(
 
                 frame_count += 1;
                 if frame_count % 100 == 1 {
-                    log::info!("BGM frame {} ok, {} bytes", frame_count, stereo_samples.len());
+                    let peak = stereo_samples.iter().map(|s| s.abs()).fold(0i16, i16::max);
+                    debug_log(&format!("bgm_loop[{}]: frame {} ok, {} samples, peak={}", pid, frame_count, stereo_samples.len(), peak));
                 }
 
-                if sender.send(stereo_samples).is_err() {
-                    break;
+                // 非阻塞发送，channel 满时短暂等待并检查退出标志
+                let send_len = stereo_samples.len();
+                let mut samples_to_send = Some(stereo_samples);
+                while let Some(samples) = samples_to_send.take() {
+                    match sender.try_send(samples) {
+                        Ok(_) => {
+                            if frame_count % 100 == 1 {
+                                debug_log(&format!("bgm_loop[{}]: sent {} samples to channel", pid, send_len));
+                            }
+                            break;
+                        }
+                        Err(crossbeam_channel::TrySendError::Full(samples)) => {
+                            if !running.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            samples_to_send = Some(samples);
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                    }
                 }
             }
             Err(e) => {
@@ -1297,12 +1354,13 @@ fn audio_loop(
                             }
                         }
 
-                        // 检测模型是否被回声打废：输入有信号但降噪输出全零
+                        // 检测模型是否被回声打废：输入能量异常高（回声反馈）但降噪输出全零
+                        // 阈值 1000：回声反馈时输入能量飙升到数千，正常键盘鼠标只有几百
                         let input_peak = input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
                         let output_peak = output_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                        if input_peak > 100.0 && output_peak < 1.0 {
+                        if input_peak > 1000.0 && output_peak < 1.0 {
                             consecutive_zero_output += 1;
-                            if consecutive_zero_output >= 3 {
+                            if consecutive_zero_output >= 10 {
                                 log::warn!("Denoise model corrupted (in={:.0}, out={:.0}), rebuilding", input_peak, output_peak);
                                 denoise = denoise::create_model(
                                     model_name.as_deref().unwrap_or("RNNoise"),
@@ -1449,6 +1507,12 @@ fn audio_loop(
                         if bgm_buf.len() > max_buf {
                             let drain = bgm_buf.len() - max_buf;
                             bgm_buf.drain(..drain);
+                        }
+
+                        // 诊断：BGM buffer 峰值
+                        if frame_count % 480 == 0 {
+                            let bgm_peak = bgm_buf.iter().map(|s| s.abs()).fold(0i16, i16::max);
+                            debug_log(&format!("BGM MIX: buf_len={} peak={} gain={:.2}", bgm_buf.len(), bgm_peak, bgm_config.read().bgm_gain));
                         }
 
                         let bgm_gain = bgm_config.read().bgm_gain;

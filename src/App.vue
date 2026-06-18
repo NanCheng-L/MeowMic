@@ -60,6 +60,9 @@ const openTutorial = async () => {
 }
 
 const openSettings = async () => {
+  // 初始化完成前不打开设置窗口（避免 settings.value 还是默认值）
+  if (!initialized) return
+
   const existing = await WebviewWindow.getByLabel('settings')
   if (existing) {
     try {

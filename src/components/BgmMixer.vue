@@ -73,12 +73,8 @@ const toggleProcess = async (pid: number) => {
   if (switching.value) return
   switching.value = true
   try {
-    const newSet = new Set(selectedPids.value)
-    if (newSet.has(pid)) {
-      newSet.delete(pid)
-    } else {
-      newSet.add(pid)
-    }
+    // 单选：点击已选中的取消，点击新的替换
+    const newSet = selectedPids.value.has(pid) ? new Set<number>() : new Set([pid])
     selectedPids.value = newSet
 
     // 如果已开启，立即更新混音

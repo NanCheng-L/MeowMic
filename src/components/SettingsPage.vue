@@ -162,8 +162,12 @@ const stopRecording = () => {
 
 // 接收主窗口发来的当前配置
 let unlistenInit: (() => void) | null = null
+let settingsInitialized = false
 
 onMounted(async () => {
+  // 重置初始化标记（窗口重建时重新接收完整配置）
+  settingsInitialized = false
+
   // 从 localStorage 同步语言到 i18n（窗口复用时也能更新）
   const savedLang = localStorage.getItem('meowmic-lang')
   if (savedLang) {
@@ -176,29 +180,34 @@ onMounted(async () => {
   } catch {}
 
   unlistenInit = await listen<any>('settings-init', (event) => {
+    // 首次接收：填充本地配置；后续：仅同步设备/模型列表（不覆盖用户正在编辑的值）
     const p = event.payload
-    localConfig.value.selectedModel = p.selectedModel || 'RNNoise'
-    localConfig.value.hotkey = p.hotkey || 'Ctrl+Shift+D'
-    localConfig.value.hotkeyEnabled = p.hotkeyEnabled ?? true
-    localConfig.value.hotkeyExplode = p.hotkeyExplode || ''
-    localConfig.value.hotkeyExplodeEnabled = p.hotkeyExplodeEnabled ?? false
-    localConfig.value.hotkeyMonitor = p.hotkeyMonitor || ''
-    localConfig.value.hotkeyMonitorEnabled = p.hotkeyMonitorEnabled ?? false
-    localConfig.value.hotkeyBgm = p.hotkeyBgm || ''
-    localConfig.value.hotkeyBgmEnabled = p.hotkeyBgmEnabled ?? false
-    localConfig.value.hotkeyEq = p.hotkeyEq || ''
-    localConfig.value.hotkeyEqEnabled = p.hotkeyEqEnabled ?? false
-    localConfig.value.autostart = p.autostart || false
-    localConfig.value.language = p.language || 'zh-CN'
+    if (!settingsInitialized) {
+      settingsInitialized = true
+      localConfig.value.selectedModel = p.selectedModel || 'RNNoise'
+      localConfig.value.hotkey = p.hotkey || 'Ctrl+Shift+D'
+      localConfig.value.hotkeyEnabled = p.hotkeyEnabled ?? true
+      localConfig.value.hotkeyExplode = p.hotkeyExplode || ''
+      localConfig.value.hotkeyExplodeEnabled = p.hotkeyExplodeEnabled ?? false
+      localConfig.value.hotkeyMonitor = p.hotkeyMonitor || ''
+      localConfig.value.hotkeyMonitorEnabled = p.hotkeyMonitorEnabled ?? false
+      localConfig.value.hotkeyBgm = p.hotkeyBgm || ''
+      localConfig.value.hotkeyBgmEnabled = p.hotkeyBgmEnabled ?? false
+      localConfig.value.hotkeyEq = p.hotkeyEq || ''
+      localConfig.value.hotkeyEqEnabled = p.hotkeyEqEnabled ?? false
+      localConfig.value.autostart = p.autostart || false
+      localConfig.value.language = p.language || 'zh-CN'
+      // 同步语言到 i18n（窗口复用时更新界面语言）
+      if (p.language) {
+        setLocale(p.language)
+      }
+      // 同步主题
+      if (p.theme) {
+        setTheme(p.theme)
+      }
+    }
+    // 设备/模型列表始终同步（用户不会手动编辑这些）
     availableModels.value = p.availableModels || []
-    // 同步语言到 i18n（窗口复用时更新界面语言）
-    if (p.language) {
-      setLocale(p.language)
-    }
-    // 同步主题
-    if (p.theme) {
-      setTheme(p.theme)
-    }
   })
 })
 
