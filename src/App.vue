@@ -373,7 +373,7 @@ const handleEqEnabledChange = async (enabled: boolean) => {
   saveConfig()
   try {
     await invoke('update_eq_config', { enabled })
-    await emit('eq-changed', { enabled })
+    await emit('eq-changed', { enabled, preset: eqActivePreset.value })
   } catch (e) {
     console.error('Failed to update EQ config:', e)
   }
@@ -388,7 +388,7 @@ const handleEqPresetChange = async (preset: string) => {
     const savedBands = localStorage.getItem('meowmic-eq-bands')
     const bands = savedBands ? JSON.parse(savedBands) : new Array(10).fill(0)
     await invoke('update_eq_config', { bands })
-    await emit('eq-changed', { enabled: eqEnabled.value })
+    await emit('eq-changed', { enabled: eqEnabled.value, preset })
     return
   }
 
@@ -398,7 +398,7 @@ const handleEqPresetChange = async (preset: string) => {
     const found = presets.find(([k]) => k === preset)
     if (found) {
       await invoke('update_eq_config', { bands: found[1] })
-      await emit('eq-changed', { enabled: eqEnabled.value })
+      await emit('eq-changed', { enabled: eqEnabled.value, preset })
     }
   } catch (e) {
     console.error('Failed to apply EQ preset:', e)

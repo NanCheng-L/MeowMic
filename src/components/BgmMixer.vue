@@ -130,16 +130,11 @@ const refreshProcesses = async () => {
   await loadProcesses()
 }
 
-let refreshTimer: ReturnType<typeof setInterval> | null = null
-
 onMounted(() => {
   loadProcesses()
-  // 每 3 秒自动刷新进程列表
-  refreshTimer = setInterval(loadProcesses, 3000)
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
 })
 </script>
 

@@ -219,9 +219,15 @@ impl AudioEngine {
 
     /// 启动 BGM 捕获线程（按进程 PID 列表，每个 PID 一个线程）
     pub fn start_bgm(&self, pids: Vec<u32>) -> Result<(), String> {
-        // 如果旧线程还在运行，先停止并等待退出
-        self.stop_bgm();
+        // 先停旧线程（不等待退出，直接标记停止）
+        self.bgm_running.store(false, Ordering::Relaxed);
+        {
+            let mut cfg = self.bgm_config.write();
+            cfg.enabled = false;
+        }
+        // 不 join 旧线程，让它自行退出，避免阻塞
 
+        log::info!("start_bgm: pids={:?}", pids);
         let sender = self.bgm_sender.clone();
 
         // 更新配置

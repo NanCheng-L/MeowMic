@@ -602,8 +602,25 @@ onMounted(async () => {
     resizeObserver.observe(containerRef.value)
   }
 
-  unlisten = await listen<{ enabled: boolean }>('eq-changed', (event) => {
+  unlisten = await listen<{ enabled: boolean; preset?: string }>('eq-changed', (event) => {
     enabled.value = event.payload.enabled
+    if (event.payload.preset) {
+      activePreset.value = event.payload.preset
+      // 从预设列表加载 bands 并重绘曲线
+      if (event.payload.preset === 'custom') {
+        const savedBands = localStorage.getItem('meowmic-eq-bands')
+        if (savedBands) {
+          try { bands.value = JSON.parse(savedBands) } catch { bands.value = new Array(10).fill(0) }
+        } else {
+          bands.value = new Array(10).fill(0)
+        }
+      } else {
+        const preset = presets.value.find(([k]) => k === event.payload.preset)
+        if (preset) {
+          bands.value = [...preset[1]]
+        }
+      }
+    }
     draw()
   })
 
