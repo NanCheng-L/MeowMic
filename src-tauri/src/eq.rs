@@ -18,7 +18,7 @@ pub const EQ_PRESET_NAMES: &[&str] = &[
     "podcast",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EqConfig {
     pub enabled: bool,
     pub bands: [f32; NUM_BANDS],
@@ -56,6 +56,14 @@ impl Biquad {
         }
     }
 
+    /// 重置内部状态（系数不变），用于 NaN 污染后恢复
+    fn reset_state(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+
     fn process(&mut self, input: f32) -> f32 {
         let output = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1 - self.a2 * self.y2;
@@ -63,6 +71,11 @@ impl Biquad {
         self.x1 = input;
         self.y2 = self.y1;
         self.y1 = output;
+        // 检测 NaN/Inf 污染，自动重置状态防止永久毒化
+        if !output.is_finite() {
+            self.reset_state();
+            return 0.0;
+        }
         output
     }
 }

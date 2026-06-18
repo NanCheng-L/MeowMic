@@ -36,6 +36,7 @@ const loadProcesses = async () => {
 
 // 监听全局快捷键触发的 BGM 开关
 const handleHotkeyToggle = () => {
+  if (switching.value) return
   handleToggle(!enabled.value)
 }
 
@@ -84,6 +85,9 @@ const toggleProcess = async (pid: number) => {
       } catch {}
       if (newSet.size > 0) {
         await invoke('start_bgm', { pids: Array.from(newSet) })
+      } else {
+        // 取消选中最后一个进程，关闭 BGM
+        enabled.value = false
       }
     }
   } finally {

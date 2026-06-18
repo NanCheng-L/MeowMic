@@ -358,6 +358,8 @@ fn stop_bgm(state: State<'_, EngineState>) -> Result<(), String> {
     let engine = state.engine.lock();
     audio_engine::debug_log("lib: stop_bgm engine locked, calling stop_bgm...");
     engine.stop_bgm();
+    // 用户手动停止 BGM，取消引擎重启后的自动恢复
+    engine.cancel_bgm_auto_restart();
     audio_engine::debug_log("lib: stop_bgm done");
     Ok(())
 }

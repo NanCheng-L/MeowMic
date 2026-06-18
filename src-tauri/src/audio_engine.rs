@@ -42,8 +42,6 @@ impl Default for DenoiseConfig {
 pub struct BgmConfig {
     pub process_names: Vec<String>,
     pub process_pids: Vec<u32>,
-    pub bgm_gain: f32,
-    pub enabled: bool,
 }
 
 impl Default for BgmConfig {
@@ -51,8 +49,6 @@ impl Default for BgmConfig {
         Self {
             process_names: Vec::new(),
             process_pids: Vec::new(),
-            bgm_gain: 1.0,
-            enabled: false,
         }
     }
 }
@@ -76,14 +72,20 @@ pub struct AudioEngine {
     running: Arc<AtomicBool>,
     config: Arc<RwLock<DenoiseConfig>>,
     eq_config: Arc<RwLock<EqConfig>>,
+    /// EQ 配置变更标记：update_eq_config 时置 true，audio_loop 读取后清 false
+    eq_config_dirty: Arc<AtomicBool>,
     stats: Arc<RwLock<AudioStats>>,
     /// audio_loop 读取：BGM 是否激活（控制混音开关）
     bgm_running: Arc<AtomicBool>,
+    /// BGM 增益（无锁原子读，避免 RwLock 竞争）
+    bgm_gain: Arc<AtomicU32>,
     bgm_config: Arc<RwLock<BgmConfig>>,
     bgm_sender: Sender<Vec<i16>>,
     bgm_receiver: Receiver<Vec<i16>>,
     /// 每批 BGM 线程的独立停止标志，start_bgm 时替换（新旧线程用不同 Arc，互不干扰）
     bgm_thread_running: parking_lot::Mutex<Arc<AtomicBool>>,
+    /// 引擎重启前 BGM 是否激活，用于自动恢复
+    bgm_was_active: Arc<AtomicBool>,
     explode_enabled: Arc<AtomicBool>,
     explode_intensity: Arc<AtomicU32>,
     monitor_enabled: Arc<AtomicBool>,
@@ -103,12 +105,15 @@ impl AudioEngine {
             running: Arc::new(AtomicBool::new(false)),
             config: Arc::new(RwLock::new(DenoiseConfig::default())),
             eq_config: Arc::new(RwLock::new(EqConfig::default())),
+            eq_config_dirty: Arc::new(AtomicBool::new(true)),
             stats: Arc::new(RwLock::new(AudioStats::default())),
             bgm_running: Arc::new(AtomicBool::new(false)),
+            bgm_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             bgm_config: Arc::new(RwLock::new(BgmConfig::default())),
             bgm_sender: bgm_tx,
             bgm_receiver: bgm_rx,
             bgm_thread_running: parking_lot::Mutex::new(Arc::new(AtomicBool::new(false))),
+            bgm_was_active: Arc::new(AtomicBool::new(false)),
             explode_enabled: Arc::new(AtomicBool::new(false)),
             explode_intensity: Arc::new(AtomicU32::new(50)),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
@@ -147,9 +152,10 @@ impl AudioEngine {
         let running = self.running.clone();
         let config = self.config.clone();
         let eq_config = self.eq_config.clone();
+        let eq_config_dirty = self.eq_config_dirty.clone();
         let stats = self.stats.clone();
-        let bgm_config = self.bgm_config.clone();
         let bgm_running = self.bgm_running.clone();
+        let bgm_gain = self.bgm_gain.clone();
         let bgm_receiver = self.bgm_receiver.clone();
         let explode_enabled = self.explode_enabled.clone();
         let explode_intensity = self.explode_intensity.clone();
@@ -170,9 +176,10 @@ impl AudioEngine {
                 running,
                 config,
                 eq_config,
+                eq_config_dirty,
                 stats,
                 bgm_running,
-                bgm_config,
+                bgm_gain,
                 Some(bgm_receiver),
                 input_device_name,
                 output_device_name,
@@ -191,6 +198,18 @@ impl AudioEngine {
 
         // 存储线程句柄，stop() 时等待退出
         *self.thread_handle.lock().unwrap() = Some(handle);
+
+        // 引擎重启后自动恢复 BGM（如果之前是激活的）
+        if self.bgm_was_active.swap(false, Ordering::Acquire) {
+            let pids = self.bgm_config.read().process_pids.clone();
+            if !pids.is_empty() {
+                log::info!("auto-restarting BGM after engine restart, pids={:?}", pids);
+                debug_log(&format!("start: auto-restarting BGM, pids={:?}", pids));
+                if let Err(e) = self.start_bgm(pids) {
+                    log::error!("auto-restart BGM failed: {}", e);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -228,20 +247,23 @@ impl AudioEngine {
     /// `wait_for_event` 超时后退出）。新线程使用新 flag，互不干扰。
     pub fn start_bgm(&self, pids: Vec<u32>) -> Result<(), String> {
         debug_log("start_bgm: begin");
+        // WASAPI 共享模式下多个 loopback 客户端会互相干扰，强制单进程
+        let pids = if pids.len() > 1 {
+            log::warn!("start_bgm: multiple PIDs passed ({}), truncating to first", pids.len());
+            vec![pids[0]]
+        } else {
+            pids
+        };
         // 1. 标记旧线程停止（不 join，让其自行退出，避免阻塞 engine lock）
         {
             let old_stop = self.bgm_thread_running.lock().clone();
-            old_stop.store(false, Ordering::Relaxed);
+            old_stop.store(false, Ordering::Release);
             debug_log("start_bgm: old threads marked stop");
         }
-        self.bgm_running.store(false, Ordering::Relaxed);
-        {
-            let mut cfg = self.bgm_config.write();
-            cfg.enabled = false;
-        }
-        // 清空 channel 残留数据
-        while self.bgm_receiver.try_recv().is_ok() {}
-        debug_log("start_bgm: channel drained");
+        self.bgm_running.store(false, Ordering::Release);
+        // 不在这里 drain channel——audio_loop 的 Receiver clone 是竞争消费者，
+        // 两边同时 try_recv 会互相抢消息。旧数据在 bgm_running=false 期间不会被混入输出，
+        // 下次 bgm_running=true 时 audio_loop 会自然消费掉（bgm_buf 有上限保护）。
 
         log::info!("start_bgm: pids={:?}", pids);
         let sender = self.bgm_sender.clone();
@@ -250,13 +272,12 @@ impl AudioEngine {
         {
             let mut cfg = self.bgm_config.write();
             cfg.process_pids = pids.clone();
-            cfg.enabled = true;
         }
 
         // 2. 创建新的独立停止标志给这批线程（旧线程持有旧 Arc，互不干扰）
         let new_stop = Arc::new(AtomicBool::new(true));
         *self.bgm_thread_running.lock() = new_stop.clone();
-        self.bgm_running.store(true, Ordering::Relaxed);
+        self.bgm_running.store(true, Ordering::Release);
         debug_log(&format!("start_bgm: spawning {} threads", pids.len()));
 
         // 为每个 PID 启动一个独立的 loopback 线程
@@ -289,7 +310,14 @@ impl AudioEngine {
             })
             .map_err(|e| format!("Failed to spawn BGM manager: {}", e))?;
 
-        *self.bgm_thread_handle.lock().unwrap() = Some(manager_handle);
+        // 旧句柄交给后台线程 join
+        let old_handle = self.bgm_thread_handle.lock().unwrap().replace(manager_handle);
+        if let Some(h) = old_handle {
+            std::thread::Builder::new()
+                .name("bgm-cleanup".into())
+                .spawn(move || { let _ = h.join(); })
+                .ok();
+        }
         debug_log("start_bgm: done");
 
         Ok(())
@@ -298,27 +326,35 @@ impl AudioEngine {
     /// 停止 BGM 捕获（只标记停止，不 join，避免阻塞 engine lock）
     pub fn stop_bgm(&self) {
         debug_log("stop_bgm: begin");
+        // 记录 BGM 是否活跃，用于引擎重启后自动恢复
+        if self.bgm_running.load(Ordering::Acquire) {
+            self.bgm_was_active.store(true, Ordering::Release);
+        }
         {
             let stop = self.bgm_thread_running.lock().clone();
-            stop.store(false, Ordering::Relaxed);
+            stop.store(false, Ordering::Release);
             debug_log("stop_bgm: threads marked stop");
         }
-        self.bgm_running.store(false, Ordering::Relaxed);
-        {
-            let mut cfg = self.bgm_config.write();
-            cfg.enabled = false;
+        self.bgm_running.store(false, Ordering::Release);
+        // 将旧句柄交给后台线程 join（避免 detach 导致 WASAPI 资源泄漏）
+        let old_handle = self.bgm_thread_handle.lock().unwrap().take();
+        if let Some(h) = old_handle {
+            std::thread::Builder::new()
+                .name("bgm-cleanup".into())
+                .spawn(move || { let _ = h.join(); })
+                .ok();
         }
-        // 丢弃线程句柄，旧线程会在 ~100ms 内自行退出
-        *self.bgm_thread_handle.lock().unwrap() = None;
-        // 清空 channel 残留数据
-        while self.bgm_receiver.try_recv().is_ok() {}
         debug_log("stop_bgm: done");
+    }
+
+    /// 用户手动停止 BGM 时调用，取消引擎重启后的自动恢复
+    pub fn cancel_bgm_auto_restart(&self) {
+        self.bgm_was_active.store(false, Ordering::Release);
     }
 
     /// 更新 BGM 配置（增益等）
     pub fn update_bgm_config(&self, bgm_gain: f32) {
-        let mut cfg = self.bgm_config.write();
-        cfg.bgm_gain = bgm_gain.clamp(0.0, 10.0);
+        self.bgm_gain.store(bgm_gain.clamp(0.0, 10.0).to_bits(), Ordering::Release);
     }
 
     /// 设置爆炸模式
@@ -344,6 +380,7 @@ impl AudioEngine {
     /// 更新 EQ 配置
     pub fn update_eq_config(&self, eq_config: EqConfig) {
         *self.eq_config.write() = eq_config;
+        self.eq_config_dirty.store(true, Ordering::Release);
     }
 
     /// 获取 EQ 配置
@@ -841,6 +878,9 @@ fn bgm_process_loop(
     debug_log(&format!("bgm_loop[{}]: creating loopback client", pid));
     let mut client = AudioClient::new_application_loopback_client(pid, true)
         .map_err(|e| format!("Failed to create process loopback client: {}", e))?;
+    if !running.load(Ordering::Acquire) {
+        return Ok(()); // 被要求停止，释放 WASAPI 资源
+    }
 
     // 进程 loopback 不支持 get_mixformat()，使用固定格式：32-bit float, 48kHz, 立体声
     let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
@@ -860,6 +900,9 @@ fn bgm_process_loop(
     client
         .initialize_client(&format, 0, &Direction::Capture, &ShareMode::Shared, true)
         .map_err(|e| format!("Failed to initialize BGM client: {}", e))?;
+    if !running.load(Ordering::Acquire) {
+        return Ok(());
+    }
 
     debug_log(&format!("bgm_loop[{}]: setting event handle", pid));
     let event_handle = client
@@ -870,6 +913,9 @@ fn bgm_process_loop(
     let capture = client
         .get_audiocaptureclient()
         .map_err(|e| format!("Failed to get BGM capture client: {}", e))?;
+    if !running.load(Ordering::Acquire) {
+        return Ok(());
+    }
 
     debug_log(&format!("bgm_loop[{}]: starting stream", pid));
     client
@@ -884,7 +930,7 @@ fn bgm_process_loop(
 
     let mut frame_count: u64 = 0;
 
-    while running.load(Ordering::Relaxed) {
+    while running.load(Ordering::Acquire) {
         if event_handle.wait_for_event(100).is_err() {
             std::thread::sleep(Duration::from_millis(1));
             continue;
@@ -954,7 +1000,7 @@ fn bgm_process_loop(
                             break;
                         }
                         Err(crossbeam_channel::TrySendError::Full(samples)) => {
-                            if !running.load(Ordering::Relaxed) {
+                            if !running.load(Ordering::Acquire) {
                                 break;
                             }
                             samples_to_send = Some(samples);
@@ -982,9 +1028,10 @@ fn audio_loop(
     running: Arc<AtomicBool>,
     config: Arc<RwLock<DenoiseConfig>>,
     eq_config: Arc<RwLock<EqConfig>>,
+    eq_config_dirty: Arc<AtomicBool>,
     stats: Arc<RwLock<AudioStats>>,
     bgm_running: Arc<AtomicBool>,
-    bgm_config: Arc<RwLock<BgmConfig>>,
+    bgm_gain: Arc<AtomicU32>,
     bgm_receiver: Option<Receiver<Vec<i16>>>,
     input_device_name: Option<String>,
     output_device_name: Option<String>,
@@ -1191,9 +1238,12 @@ fn audio_loop(
 
     // ====== EQ 处理器初始化 ======
     let mut eq_processor = EqProcessor::new(48000);
+    let mut last_eq_config: Option<EqConfig> = None;
     let current_eq_config = eq_config.read().clone();
+    eq_config_dirty.store(false, Ordering::Release); // 初始读取后清除标记
     if current_eq_config.enabled {
         eq_processor.apply_config(&current_eq_config);
+        last_eq_config = Some(current_eq_config.clone());
         log::info!("EQ enabled with preset bands");
     }
 
@@ -1277,7 +1327,7 @@ fn audio_loop(
     let mut loop_iteration: u64 = 0;
     let mut consecutive_zero_reads: u32 = 0;
     let mut consecutive_read_errors: u32 = 0;
-    while running.load(Ordering::Relaxed) {
+    while running.load(Ordering::Acquire) {
         if input_handle.wait_for_event(100).is_err() {
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
@@ -1367,14 +1417,17 @@ fn audio_loop(
                                     resource_dir.as_deref()
                                 );
                                 eq_processor = EqProcessor::new(48000);
+                                last_eq_config = None; // 强制重新应用配置
+                                eq_config_dirty.store(false, Ordering::Release);
                                 let eq_cfg = eq_config.read().clone();
                                 if eq_cfg.enabled {
                                     eq_processor.apply_config(&eq_cfg);
+                                    last_eq_config = Some(eq_cfg);
                                 }
                                 input_acc.clear();
-                                // 清除保存的模型状态，防止损坏状态被重新加载
+                                // 清除当前模型的保存状态，防止损坏状态被重新加载（不清其他模型）
                                 if let Ok(mut states) = saved_model_states.lock() {
-                                    states.clear();
+                                    states.remove(&current_model_name);
                                 }
                                 consecutive_zero_output = 0;
                             }
@@ -1453,10 +1506,18 @@ fn audio_loop(
                     }
 
                     // ============ EQ 均衡器 ============
-                    let current_eq = eq_config.read().clone();
+                    // 仅在配置变化时读取 RwLock + 重算系数（避免每帧 clone + lock 开销）
+                    if eq_config_dirty.swap(false, Ordering::Acquire) {
+                        last_eq_config = Some(eq_config.read().clone());
+                        if let Some(ref eq) = last_eq_config {
+                            if eq.enabled {
+                                eq_processor.apply_config(eq);
+                            }
+                        }
+                    }
+                    let current_eq = last_eq_config.clone().unwrap_or_default();
                     let mixed_samples = if current_eq.enabled {
                         let mut frame = mixed_samples;
-                        eq_processor.apply_config(&current_eq);
                         eq_processor.process_frame(&mut frame);
                         // EQ biquad 滤波器在极端参数下可能输出 NaN/Inf
                         for s in frame.iter_mut() {
@@ -1466,6 +1527,7 @@ fn audio_loop(
                         }
                         frame
                     } else {
+                        last_eq_config = None; // EQ 关闭时清除跟踪，重新开启时重算系数
                         mixed_samples
                     };
 
@@ -1497,7 +1559,7 @@ fn audio_loop(
                     };
 
                     // ============ BGM 混音 ============
-                    let final_samples = if bgm_running.load(Ordering::Relaxed) {
+                    let final_samples = if bgm_running.load(Ordering::Acquire) {
                         if let Some(ref rx) = bgm_receiver {
                             while let Ok(bgm_samples) = rx.try_recv() {
                                 bgm_buf.extend_from_slice(&bgm_samples);
@@ -1512,10 +1574,11 @@ fn audio_loop(
                         // 诊断：BGM buffer 峰值
                         if frame_count % 480 == 0 {
                             let bgm_peak = bgm_buf.iter().map(|s| s.abs()).fold(0i16, i16::max);
-                            debug_log(&format!("BGM MIX: buf_len={} peak={} gain={:.2}", bgm_buf.len(), bgm_peak, bgm_config.read().bgm_gain));
+                            let gain = f32::from_bits(bgm_gain.load(Ordering::Acquire));
+                            debug_log(&format!("BGM MIX: buf_len={} peak={} gain={:.2}", bgm_buf.len(), bgm_peak, gain));
                         }
 
-                        let bgm_gain = bgm_config.read().bgm_gain;
+                        let bgm_gain_val = f32::from_bits(bgm_gain.load(Ordering::Acquire));
 
                         mixed_samples
                             .iter()
@@ -1536,7 +1599,7 @@ fn audio_loop(
                                     0.0
                                 };
                                 let bgm_mono = (bgm_l + bgm_r) / 2.0;
-                                mic_sample + bgm_mono * bgm_gain
+                                mic_sample + bgm_mono * bgm_gain_val
                             })
                             .collect()
                     } else {
@@ -1552,7 +1615,7 @@ fn audio_loop(
                     }
 
                     // 每秒记录 BGM 缓冲区状态，诊断漂移
-                    if frame_count % 480 == 0 && bgm_running.load(Ordering::Relaxed) {
+                    if frame_count % 480 == 0 && bgm_running.load(Ordering::Acquire) {
                         debug_log(&format!("BGM buf level: {} samples ({:.1}ms)", bgm_buf.len(), bgm_buf.len() as f64 / 48000.0 * 1000.0));
                     }
 
@@ -1656,7 +1719,7 @@ fn audio_loop(
                             "DIAG frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
                             frame_count, input_peak, pre_gain_peak, post_gain_peak,
                             post_eq_peak, post_bgm_peak, output_peak,
-                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Relaxed)
+                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Acquire)
                         ));
                     }
 
@@ -1685,7 +1748,7 @@ fn audio_loop(
                             "ALARM frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
                             frame_count, input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max),
                             pre_gain_peak, post_gain_peak, post_eq_peak, post_bgm_peak, output_peak,
-                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Relaxed)
+                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Acquire)
                         ));
                     }
 

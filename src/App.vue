@@ -106,24 +106,7 @@ const openSettings = async () => {
     center: true,
     resizable: true,
   })
-  setTimeout(async () => {
-    try {
-      await emit('settings-init', {
-        selectedInput: selectedInput.value,
-        selectedOutput: selectedOutput.value,
-        selectedModel: selectedModel.value,
-        monitorEnabled: monitorEnabled.value,
-        inputDevices: inputDevices.value,
-        outputDevices: outputDevices.value,
-        availableModels: availableModels.value,
-        hotkey: settings.value.hotkey,
-        hotkeyEnabled: settings.value.hotkeyEnabled,
-        autostart: settings.value.autostart,
-        language: localStorage.getItem('meowmic-lang') || 'zh-CN',
-        theme: theme.value,
-      })
-    } catch {}
-  }, 300)
+  // 不在这里发 settings-init——设置窗口挂载后会发 settings-request，由监听器响应
 }
 
 const selectedModel = ref('RNNoise')
@@ -554,6 +537,32 @@ onMounted(async () => {
     try {
       await loadSettings()
     } catch {}
+  })
+
+  // 设置窗口挂载后主动请求配置，响应最新设置
+  await listen('settings-request', async () => {
+    await emit('settings-init', {
+      selectedInput: selectedInput.value,
+      selectedOutput: selectedOutput.value,
+      selectedModel: selectedModel.value,
+      monitorEnabled: monitorEnabled.value,
+      inputDevices: inputDevices.value,
+      outputDevices: outputDevices.value,
+      availableModels: availableModels.value,
+      hotkey: settings.value.hotkey,
+      hotkeyEnabled: settings.value.hotkeyEnabled,
+      hotkeyExplode: settings.value.hotkeyExplode,
+      hotkeyExplodeEnabled: settings.value.hotkeyExplodeEnabled,
+      hotkeyMonitor: settings.value.hotkeyMonitor,
+      hotkeyMonitorEnabled: settings.value.hotkeyMonitorEnabled,
+      hotkeyBgm: settings.value.hotkeyBgm,
+      hotkeyBgmEnabled: settings.value.hotkeyBgmEnabled,
+      hotkeyEq: settings.value.hotkeyEq,
+      hotkeyEqEnabled: settings.value.hotkeyEqEnabled,
+      autostart: settings.value.autostart,
+      language: localStorage.getItem('meowmic-lang') || 'zh-CN',
+      theme: theme.value,
+    })
   })
 
   // 监听引擎重启请求（监听设备变更时触发）

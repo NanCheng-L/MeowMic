@@ -209,6 +209,12 @@ onMounted(async () => {
     // 设备/模型列表始终同步（用户不会手动编辑这些）
     availableModels.value = p.availableModels || []
   })
+
+  // 主动请求主窗口发送最新配置（替代 setTimeout 猜测）
+  try {
+    const { emit: emitEvent } = await import('@tauri-apps/api/event')
+    await emitEvent('settings-request')
+  } catch {}
 })
 
 onUnmounted(() => {
@@ -279,12 +285,8 @@ watch(() => localConfig.value.language, (lang) => {
   localStorage.setItem('meowmic-lang', lang)
 })
 
-const handleClose = async () => {
-  // 通知主窗口重新读取设置
-  try {
-    const { emit } = await import('@tauri-apps/api/event')
-    await emit('settings-saved')
-  } catch {}
+const handleClose = () => {
+  // 取消不保存，不通知主窗口
   getCurrentWindow().hide()
 }
 </script>
