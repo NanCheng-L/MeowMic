@@ -92,7 +92,7 @@ scripts/                # 构建/发布辅助脚本
 - **update_denoise_config 竞争**：每次调用都创建 `DenoiseConfig::default()` 会重置 strength 为 0.5。必须先 `get_config()` 读当前值再只更新传入的字段
 - **Windows 版本信息读取**：`windows` crate 0.58 没有 `Win32_System_Diagnostics_Process` feature，`GetFileVersionInfoW`/`VerQueryValueW` 需用 raw FFI（`extern "system"` 声明）
 - **进程名获取不可靠**：FileDescription 对国产软件（网易云、抖音、QQ浏览器）通常返回英文或截断值，必须用 exe 名映射表兜底；窗口标题包含动态内容（歌名、场景名），需清理 " - " 后缀和版本号
-- **BGM 多选进程**：每个 PID 启动独立 WASAPI loopback 线程，通过同一 channel 发送混音数据，用 manager 线程 join 所有子线程
+- **BGM 单进程限制**：WASAPI 共享模式下多个 `new_application_loopback_client` 同时运行会互相干扰（一个拿到静音），BGM 只能选择单个进程。每个 PID 启动独立 WASAPI loopback 线程，通过同一 channel 发送混音数据，用 manager 线程 join 所有子线程
 - **BGM start_bgm 不等待旧线程**：`start_bgm` 不能调 `stop_bgm().join()` 等旧线程退出，否则阻塞 Tauri 命令线程导致 UI 卡死。只 `bgm_running.store(false)` 标记停止，旧线程自行退出。`stop_bgm()` 的 join 逻辑仅在显式停止时使用
 - **设备热拔插恢复**：`lastUserInput` 只在用户手动选设备和启动加载时更新，`devices-changed` 处理器绝不能覆盖；Vue watch 异步执行，不能用同步标志位区分用户/系统变更
 - **EQ loadEqConfig 加载顺序**：后端 `EqConfig` 在 engine 重启后 bands 恢复为全 0（default）。`loadEqConfig` 必须优先从 `localStorage('meowmic-eq-preset')` 读取预设名，用 `presets.find()` 获取正确的 bands 值，不能直接用后端返回的 bands——否则预设名正确但曲线平坦。同时 `loadPresets()` 必须在 `loadEqConfig()` 之前完成（不能用 `Promise.all`），否则 presets 数组为空
@@ -109,12 +109,13 @@ scripts/                # 构建/发布辅助脚本
 - **监听点启动同步**：`monitor_point` 后端默认为 0（关闭），前端 localStorage 保存的值需在引擎启动后调用 `setMonitor_point` 同步，否则监听不生效。需在 `handleStart` 和 HMR 热重载恢复路径中都同步
 - **监听点必须在处理阶段之前**：监听点写入必须放在对应处理阶段**之前**（如点 2 在增益前、点 3 在增益后），否则所有点读到的是同一个变量（已被后续阶段覆盖）。常见错误：把所有监听点放在处理链路末尾
 - **设置窗口模型列表兜底**：设置窗口首次打开时，`settings-init` 事件可能因窗口未加载完而丢失。需在 `onMounted` 中直接调用 `list_denoise_models` 兜底加载
+- **设置窗口启动竞争条件**：`openSettings()` 在 `loadSettings()` 完成前就能被调用，此时 `settings.value` 还是默认值（`hotkeyEnabled: true`），设置窗口会拿到错误状态。解决：`openSettings()` 加 `if (!initialized) return` 守卫，初始化完成前不打开设置窗口；SettingsPage 的 `settings-init` 监听加 `settingsInitialized` 标记，首次接收填充全部配置，后续只同步设备/模型列表
 - **WASAPI 监听设备自动跟随**：监听使用系统默认输出设备，但 WASAPI 客户端在创建时绑定设备，不会自动跟随系统默认设备变更。需要每秒检查 `find_device(None, false)` 的 ID 是否变化，变化时 emit `restart-needed` 事件触发完整引擎重启（跟切换输入设备一样），确保 RNNoise 模型和 EQ 状态被重置
 - **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
 - **WASAPI 输出缓冲区溢出**：`output_buffer` 按 `frame_size * output_bytes_per_frame` 分配，但重采样后 `out_frames` 可能膨胀（如输出设备 96kHz 时翻倍）。必须按 `frame_size * (output_sample_rate / 48000).ceil()` 分配最大可能的缓冲区大小
 - **WASAPI 输出 padding 跳帧**：当缓冲区 > 20ms 时跳过写入会导致可听到的卡顿。应始终写入，让 WASAPI 处理背压。跳过帧 = 音频间隙 = 卡麦
 - **EQ 后缺少 NaN/Inf 检查**：Biquad IIR 滤波器在极端参数下可能输出 NaN/Inf，穿透 BGM 混音污染输出。必须在 EQ 处理后添加 `is_finite()` 检查
-- **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>100）但降噪输出全零（<1）连续 3 帧时，重建模型并清除 `saved_model_states`
+- **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>1000）但降噪输出全零（<1）连续 10 帧时，重建模型并清除 `saved_model_states`。阈值不能太低（如 >100/3 帧），正常键盘鼠标声被正确降噪时会被误判为模型损坏
 - **Tauri 托盘左键点击**：`TrayIconBuilder` 默认左键也会弹右键菜单。用 `.show_menu_on_left_click(false)` 禁止左键弹菜单，配合 `.on_tray_icon_event` 处理左键单击打开主窗口
 
 ## 版本号管理
