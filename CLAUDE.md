@@ -74,7 +74,8 @@ scripts/                # 构建/发布辅助脚本
 - **VB-Audio Cable 驱动安装**：打包时必须包含完整驱动包（.inf + .sys + .cat + ARM64 .sys），缺少任一文件会导致安装静默失败；用 PowerShell `Start-Process -Verb RunAs` 触发 UAC 提权，配合 `CREATE_NO_WINDOW` 标志隐藏控制台窗口；本地找不到安装包时自动从官网下载兜底；安装后 WASAPI 设备列表可能有缓存延迟，需重启应用才能检测到新设备
 - **Tauri dev 资源目录**：`app.path().resource_dir()` 在 dev 模式指向 `target/debug/`，需 fallback 到 `CARGO_MANIFEST_DIR/resources/models`（模型）和 `resources/vb-cable`（驱动）
 - **WASAPI 多设备输出**：监听功能需要同时向两个设备写入音频，每个 WASAPI render client 必须独立设置事件句柄（`set_get_eventhandle`）并在写入前 `wait_for_event`，否则会出现 `0x88890006`（`AUDCLNT_BUFFER_OVERFLOW`）缓冲区溢出错误，导致无声
-- **WASAPI 监听格式**：监听设备不能复用主输出的 `output_format`（可能是 32-bit float），必须用固定 `WaveFormat::new(16, 16, &SampleType::Int, ...)` 初始化，因为写入代码固定按 i16 处理。格式不匹配会导致无声
+- **WASAPI 监听格式**：监听设备必须用**自己的 mixformat** 初始化，不能复用输出设备的格式。代码中 `init_monitor_client` 需调用 `m_client.get_mixformat()` 获取监听设备实际格式。格式不匹配会导致采样率错误，长时间运行后缓冲区积累异常数据产生电流声
+- **WASAPI 音频格式解析**：`bytes_to_f32_samples` 必须支持所有常见格式：8bit int、16bit int、24bit int、32bit int、32bit float、64bit float。K7 USB 麦克风是 24bit，缺少支持会导致字节错位产生电流声。未知格式 fallback 时必须打印警告日志
 - **WASAPI 共享模式默认端点**：共享模式下音频流绑定系统默认端点，拔耳机/切换默认设备会中断流。设备热拔插触发重启可恢复，但有短暂间隙
 - **Tauri WebviewWindow**：构造函数 `new WebviewWindow(label, opts)` 没有 `.on()` 方法，用 `.listen()` 或 `.once()`；创建独立窗口需要在 `capabilities/default.json` 添加窗口名到 `windows` 数组并声明 `core:webview:allow-create-webview-window` 权限；窗口关闭用 `hide()` 代替 `close()` 避免 label 无法释放导致再次创建失败
 - **Tauri 图标更新不生效**：替换 `icons/` 目录下的图标文件后，`pnpm tauri dev` 可能仍显示旧图标。需要清除 cargo 编译缓存（`cargo clean` 或删除 `src-tauri/target/`）再重新编译，图标才会更新。单纯重启 dev 服务不够
