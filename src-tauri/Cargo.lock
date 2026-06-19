@@ -2333,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "meowmic"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "crossbeam-channel",
  "env_logger",
