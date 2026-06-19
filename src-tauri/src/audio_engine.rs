@@ -1181,7 +1181,7 @@ fn audio_loop(
     let mut monitor_client_opt: Option<AudioClient> = None;
     let mut monitor_render_opt: Option<AudioRenderClient> = None;
     let mut monitor_event_opt: Option<wasapi::Handle> = None;
-    let monitor_format = WaveFormat::new(16, 16, &SampleType::Int, output_sample_rate as usize, 2, None);
+    let mut monitor_sample_rate: u32 = output_sample_rate; // 默认用输出设备采样率，初始化时会更新
     // 监听缓冲区：考虑重采样后可能变大（最高 192kHz → 4x）
     let monitor_max_frames = frame_size * (output_sample_rate as usize / 48000 + 1);
     let mut monitor_buffer = vec![0u8; monitor_max_frames * 2 * 2]; // stereo i16
@@ -1189,7 +1189,7 @@ fn audio_loop(
 
     // 辅助闭包：初始化监听客户端到指定设备
     let input_device_id_for_monitor = input_device.get_id().unwrap_or_default();
-    let init_monitor_client = |device: &Device, client_opt: &mut Option<AudioClient>, render_opt: &mut Option<AudioRenderClient>, event_opt: &mut Option<wasapi::Handle>, device_id_out: &mut String| -> bool {
+    let init_monitor_client = |device: &Device, client_opt: &mut Option<AudioClient>, render_opt: &mut Option<AudioRenderClient>, event_opt: &mut Option<wasapi::Handle>, device_id_out: &mut String, monitor_sr: &mut u32| -> bool {
         let device_id = device.get_id().unwrap_or_default();
         let device_name = device.get_friendlyname().unwrap_or_default();
 
@@ -1217,6 +1217,12 @@ fn audio_loop(
         }
 
         if let Ok(mut m_client) = device.get_iaudioclient() {
+            // 获取监听设备自己的 mixformat，而不是复用输出设备的格式
+            let monitor_format = m_client.get_mixformat().unwrap_or_else(|_| {
+                log::warn!("Failed to get monitor mixformat, using fallback 48kHz 16bit");
+                WaveFormat::new(16, 16, &SampleType::Int, 48000, 2, None)
+            });
+            let device_sample_rate = monitor_format.get_samplespersec();
             let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
             if m_client.initialize_client(
                 &monitor_format,
@@ -1227,12 +1233,13 @@ fn audio_loop(
             ).is_ok() {
                 if let Ok(render) = m_client.get_audiorenderclient() {
                     let evt = m_client.set_get_eventhandle();
-                    log::info!("Monitor client ready on '{}' (format: 16bit int, {}Hz)", device_name, output_sample_rate);
-                    debug_log(&format!("Monitor: READY on '{}'", device_name));
+                    log::info!("Monitor client ready on '{}' (format: {}bit, {}Hz)", device_name, monitor_format.get_bitspersample(), device_sample_rate);
+                    debug_log(&format!("Monitor: READY on '{}' ({}Hz)", device_name, device_sample_rate));
                     *client_opt = Some(m_client);
                     *render_opt = Some(render);
                     *event_opt = evt.ok();
                     *device_id_out = device_id;
+                    *monitor_sr = device_sample_rate;
                     return true;
                 }
             }
@@ -1247,7 +1254,7 @@ fn audio_loop(
             let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
             debug_log(&format!("Monitor: default output = '{}'", monitor_output_name));
             init_monitor_client(
-                &monitor_output, &mut monitor_client_opt, &mut monitor_render_opt, &mut monitor_event_opt, &mut current_monitor_device_id
+                &monitor_output, &mut monitor_client_opt, &mut monitor_render_opt, &mut monitor_event_opt, &mut current_monitor_device_id, &mut monitor_sample_rate
             );
         }
         Err(e) => {
@@ -1519,12 +1526,12 @@ fn audio_loop(
 
                     // 监听点 1=原始输入（降噪前的 chunk）
                     if monitor_wants && current_monitor_point == 1 {
-                        write_to_monitor(&chunk, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                        write_to_monitor(&chunk, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, monitor_sample_rate);
                     }
 
                     // 监听点 2=降噪后（strength mixing 后，增益前）
                     if monitor_wants && current_monitor_point == 2 {
-                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, monitor_sample_rate);
                     }
 
                     // 应用麦克风增益（在降噪后，避免放大噪音）
@@ -1537,7 +1544,7 @@ fn audio_loop(
 
                     // 监听点 3=增益后（EQ 前）
                     if monitor_wants && current_monitor_point == 3 {
-                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, monitor_sample_rate);
                     }
 
                     // ============ EQ 均衡器 ============
@@ -1572,7 +1579,7 @@ fn audio_loop(
 
                     // 监听点 4=EQ后
                     if monitor_wants && current_monitor_point == 4 {
-                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                        write_to_monitor(&mixed_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, monitor_sample_rate);
                     }
 
                     // ============ 💥 爆炸模式：方波失真 ============
@@ -1699,7 +1706,7 @@ fn audio_loop(
 
                     // 监听点 5=最终输出（limiter 后）
                     if monitor_wants && current_monitor_point == 5 {
-                        write_to_monitor(&limited_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, output_sample_rate);
+                        write_to_monitor(&limited_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, monitor_sample_rate);
                     }
 
                     // 6. 重采样回设备采样率
@@ -1929,7 +1936,7 @@ fn write_to_monitor(
     render_opt: &Option<AudioRenderClient>,
     event_opt: &Option<wasapi::Handle>,
     buffer: &mut [u8],
-    output_sample_rate: u32,
+    monitor_sample_rate: u32,
 ) {
     let render = match render_opt {
         Some(r) => r,
@@ -1943,8 +1950,8 @@ fn write_to_monitor(
         return;
     }
     // 重采样到监听设备采样率
-    let resampled = if output_sample_rate != 48000 {
-        resample_linear(samples, 48000, output_sample_rate)
+    let resampled = if monitor_sample_rate != 48000 {
+        resample_linear(samples, 48000, monitor_sample_rate)
     } else {
         samples.to_vec()
     };
@@ -1986,13 +1993,23 @@ fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// 将原始字节样本（i16 或 f32）转换为 f32 归一化值
 fn bytes_to_f32_samples(buf: &[u8], bits: u16, sample_type: &SampleType, _channels: usize) -> Vec<f32> {
     match (bits, sample_type) {
+        (8, SampleType::Int) => buf
+            .iter()
+            .map(|&b| (b as i16 - 128) as f32 * 128.0) // unsigned 8-bit: 0-255 → -128~127, 然后放大到 i16 范围
+            .collect(),
         (16, SampleType::Int) => buf
             .chunks_exact(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
             .collect(),
-        (32, SampleType::Float) => buf
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * 32767.0)
+        (24, SampleType::Int) => buf
+            .chunks_exact(3)
+            .map(|c| {
+                // 24-bit little-endian: [low, mid, high]，符号扩展到 i32
+                let val = (c[0] as i32) | ((c[1] as i32) << 8) | ((c[2] as i32) << 16);
+                // 符号扩展：如果 bit 23 为 1，高 8 位填 1
+                let val = if val & 0x800000 != 0 { val | 0xFF000000u32 as i32 } else { val };
+                (val >> 8) as f32 // 右移 8 位，相当于除以 256，映射到 i16 范围
+            })
             .collect(),
         (32, SampleType::Int) => buf
             .chunks_exact(4)
@@ -2001,10 +2018,20 @@ fn bytes_to_f32_samples(buf: &[u8], bits: u16, sample_type: &SampleType, _channe
                 (val >> 16) as f32
             })
             .collect(),
-        _ => buf
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
+        (32, SampleType::Float) => buf
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * 32767.0)
             .collect(),
+        (64, SampleType::Float) => buf
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32 * 32767.0)
+            .collect(),
+        _ => {
+            log::warn!("Unsupported audio format: {}bit {:?}, falling back to 16bit", bits, sample_type);
+            buf.chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
+                .collect()
+        }
     }
 }
 
