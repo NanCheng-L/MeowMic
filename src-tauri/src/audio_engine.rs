@@ -1217,12 +1217,11 @@ fn audio_loop(
         }
 
         if let Ok(mut m_client) = device.get_iaudioclient() {
-            // 获取监听设备自己的 mixformat，而不是复用输出设备的格式
-            let monitor_format = m_client.get_mixformat().unwrap_or_else(|_| {
-                log::warn!("Failed to get monitor mixformat, using fallback 48kHz 16bit");
-                WaveFormat::new(16, 16, &SampleType::Int, 48000, 2, None)
-            });
-            let device_sample_rate = monitor_format.get_samplespersec();
+            // 获取监听设备的采样率，但固定使用 16bit int 格式（写入代码固定按 i16 处理）
+            let device_sample_rate = m_client.get_mixformat()
+                .map(|f| f.get_samplespersec())
+                .unwrap_or(48000);
+            let monitor_format = WaveFormat::new(16, 16, &SampleType::Int, device_sample_rate as usize, 2, None);
             let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
             if m_client.initialize_client(
                 &monitor_format,
@@ -1726,6 +1725,40 @@ fn audio_loop(
                     for (i, &sample) in stereo_out.iter().enumerate() {
                         let byte_pos = i * (output_bytes_per_frame / output_channels);
                         match (output_bits, &output_sample_type) {
+                            (8, SampleType::Int) => {
+                                // unsigned 8-bit: -32768~32767 → 0~255
+                                let val = ((sample / 128.0) + 128.0).clamp(0.0, 255.0) as u8;
+                                if byte_pos < output_buffer.len() {
+                                    output_buffer[byte_pos] = val;
+                                }
+                            }
+                            (16, SampleType::Int) => {
+                                let val = (sample.clamp(-32768.0, 32767.0)) as i16;
+                                let bytes = val.to_le_bytes();
+                                if byte_pos + 1 < output_buffer.len() {
+                                    output_buffer[byte_pos] = bytes[0];
+                                    output_buffer[byte_pos + 1] = bytes[1];
+                                }
+                            }
+                            (24, SampleType::Int) => {
+                                // 24-bit: 映射到 i32 范围，取高 24 位
+                                let val = (sample * 256.0).clamp(-8388608.0, 8388607.0) as i32;
+                                if byte_pos + 2 < output_buffer.len() {
+                                    output_buffer[byte_pos] = (val & 0xFF) as u8;
+                                    output_buffer[byte_pos + 1] = ((val >> 8) & 0xFF) as u8;
+                                    output_buffer[byte_pos + 2] = ((val >> 16) & 0xFF) as u8;
+                                }
+                            }
+                            (32, SampleType::Int) => {
+                                let val = (sample * 65536.0).clamp(-2147483648.0, 2147483647.0) as i32;
+                                let bytes = val.to_le_bytes();
+                                if byte_pos + 3 < output_buffer.len() {
+                                    output_buffer[byte_pos] = bytes[0];
+                                    output_buffer[byte_pos + 1] = bytes[1];
+                                    output_buffer[byte_pos + 2] = bytes[2];
+                                    output_buffer[byte_pos + 3] = bytes[3];
+                                }
+                            }
                             (32, SampleType::Float) => {
                                 let val = (sample / 32767.0).clamp(-1.0, 1.0);
                                 let bytes = val.to_le_bytes();
@@ -1736,7 +1769,17 @@ fn audio_loop(
                                     output_buffer[byte_pos + 3] = bytes[3];
                                 }
                             }
+                            (64, SampleType::Float) => {
+                                let val = (sample as f64 / 32767.0).clamp(-1.0, 1.0);
+                                let bytes = val.to_le_bytes();
+                                if byte_pos + 7 < output_buffer.len() {
+                                    for (j, &b) in bytes.iter().enumerate() {
+                                        output_buffer[byte_pos + j] = b;
+                                    }
+                                }
+                            }
                             _ => {
+                                // Fallback to 16bit
                                 let val = (sample.clamp(-32768.0, 32767.0)) as i16;
                                 let bytes = val.to_le_bytes();
                                 if byte_pos + 1 < output_buffer.len() {
