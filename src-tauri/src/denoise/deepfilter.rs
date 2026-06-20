@@ -13,7 +13,7 @@ pub struct DeepFilterFFI {
     sample_rate: usize,
     channels: usize,
     set_atten_lim: FnSetAttenLim,
-    set_post_filter_beta: FnSetPostFilterBeta,
+    _set_post_filter_beta: FnSetPostFilterBeta,
 }
 
 // DLL 函数签名
@@ -97,7 +97,7 @@ impl DeepFilterFFI {
                 sample_rate,
                 channels,
                 set_atten_lim,
-                set_post_filter_beta,
+                _set_post_filter_beta: set_post_filter_beta,
             })
         }
     }
