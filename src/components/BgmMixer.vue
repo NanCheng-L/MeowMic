@@ -14,7 +14,7 @@ interface AudioProcess {
 const enabled = ref(false)
 const processes = ref<AudioProcess[]>([])
 const selectedPids = ref<Set<number>>(new Set())
-const bgmGain = ref(100)
+const bgmGain = ref(Number(localStorage.getItem('meowmic-bgm-gain')) || 100)
 const loading = ref(false)
 const switching = ref(false)
 
@@ -95,8 +95,13 @@ const toggleProcess = async (pid: number) => {
   }
 }
 
+const saveBgmGain = (val: number) => {
+  localStorage.setItem('meowmic-bgm-gain', String(val))
+}
+
 const handleBgmGainChange = async (val: number) => {
   bgmGain.value = val
+  saveBgmGain(val)
   if (enabled.value) {
     await invoke('update_bgm_config', { bgmGain: val / 100 })
   }
@@ -106,6 +111,7 @@ const handleBgmGainDirect = async (val: number) => {
   if (!isNaN(val)) {
     const clamped = Math.max(0, Math.min(1000, val))
     bgmGain.value = clamped
+    saveBgmGain(clamped)
     if (enabled.value) {
       await invoke('update_bgm_config', { bgmGain: clamped / 100 })
     }
@@ -115,6 +121,7 @@ const handleBgmGainDirect = async (val: number) => {
 const spinBgmGain = async (delta: number) => {
   const newVal = Math.min(1000, Math.max(0, bgmGain.value + delta))
   bgmGain.value = newVal
+  saveBgmGain(newVal)
   if (enabled.value) {
     await invoke('update_bgm_config', { bgmGain: newVal / 100 })
   }

@@ -1,5 +1,5 @@
 use crossbeam_channel::Sender;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use wasapi::*;
@@ -488,6 +488,7 @@ pub fn bgm_process_loop(
     running: Arc<AtomicBool>,
     sender: Sender<Vec<i16>>,
     pid: u32,
+    skip_rate: Arc<AtomicU32>,
 ) -> Result<(), String> {
     debug_log(&format!("bgm_loop[{}]: initializing MTA", pid));
     let _ = initialize_mta().ok();
@@ -559,6 +560,18 @@ pub fn bgm_process_loop(
                 consecutive_errors = 0; // 重置错误计数
                 if frames_read == 0 {
                     continue;
+                }
+
+                // 自适应漂移补偿：output_pending 水位过高时，audio_loop 设置 skip_rate > 0，
+                // 此处按概率跳过当前帧，从源头减缓 BGM 数据流入，避免 output_pending 堆积。
+                let rate = f32::from_bits(skip_rate.load(Ordering::Relaxed));
+                if rate > 0.001 {
+                    // 确定性跳帧：每 N 帧跳过 1 帧（N = 1/rate，如 rate=0.01 → 每 100 帧跳 1 帧）
+                    let n = ((1.0 / rate) as u64).max(2);
+                    if frame_count % n == 0 {
+                        frame_count += 1;
+                        continue;
+                    }
                 }
 
                 let bytes_read = frames_read as usize * bytes_per_frame;

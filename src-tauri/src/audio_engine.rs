@@ -73,6 +73,8 @@ pub struct AudioEngine {
     bgm_running: Arc<AtomicBool>,
     /// BGM 增益（无锁原子读，避免 RwLock 竞争）
     bgm_gain: Arc<AtomicU32>,
+    /// BGM 漂移补偿：输出 pending 水位过高时，通知捕获线程跳过部分采样（f32 bit-cast，0.0~0.05）
+    bgm_skip_rate: Arc<AtomicU32>,
     bgm_config: Arc<RwLock<BgmConfig>>,
     bgm_sender: Sender<Vec<i16>>,
     bgm_receiver: Receiver<Vec<i16>>,
@@ -105,6 +107,7 @@ impl AudioEngine {
             stats: Arc::new(RwLock::new(AudioStats::default())),
             bgm_running: Arc::new(AtomicBool::new(false)),
             bgm_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            bgm_skip_rate: Arc::new(AtomicU32::new(0.0f32.to_bits())),
             bgm_config: Arc::new(RwLock::new(BgmConfig::default())),
             bgm_sender: bgm_tx,
             bgm_receiver: bgm_rx,
@@ -160,6 +163,7 @@ impl AudioEngine {
         let monitor_enabled = self.monitor_enabled.clone();
         let monitor_point = self.monitor_point.clone();
         let model_states = self.model_states.clone();
+        let bgm_skip_rate = self.bgm_skip_rate.clone();
 
         // 同步初始监听状态
         self.monitor_enabled.store(monitor_enabled_init, Ordering::Relaxed);
@@ -189,6 +193,7 @@ impl AudioEngine {
                 monitor_point,
                 model_states,
                 app_handle,
+                bgm_skip_rate,
             ) {
                 log::error!("Audio engine error: {}", e);
             }
@@ -284,6 +289,7 @@ impl AudioEngine {
 
         log::info!("start_bgm: pids={:?}", pids);
         let sender = self.bgm_sender.clone();
+        let skip_rate = self.bgm_skip_rate.clone();
 
         // 更新配置
         {
@@ -302,11 +308,12 @@ impl AudioEngine {
         for pid in pids {
             let sender_clone = sender.clone();
             let running_clone = new_stop.clone();
+            let skip_rate_clone = skip_rate.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("bgm-loopback-{}", pid))
                 .spawn(move || {
                     debug_log(&format!("bgm-loopback-{}: thread started", pid));
-                    if let Err(e) = bgm_process_loop(running_clone, sender_clone, pid) {
+                    if let Err(e) = bgm_process_loop(running_clone, sender_clone, pid, skip_rate_clone) {
                         log::error!("BGM process loopback error for pid {}: {}", pid, e);
                         debug_log(&format!("bgm-loopback-{}: ERROR {}", pid, e));
                     }
@@ -499,66 +506,60 @@ fn format_output_bytes(
     out_bytes
 }
 
-// ====== 带时钟漂移补偿的 WASAPI 输出写入 ======
+// ====== 带时钟漂移补偿的 WASAPI 输出写入（渐进式） ======
+// 时钟漂移补偿：当 pending 水位过高时，每帧按比例丢弃少量旧数据（而非跳过整个帧），
+// 使调整分散到多帧，听感上几乎无感。同时始终写入当前帧，避免音频中断。
 fn write_output_with_drift(
     render: &AudioRenderClient,
     client: &AudioClient,
     data: &[u8],
-    out_frames: usize,
+    _out_frames: usize,
     pending: &mut Vec<u8>,
     bytes_per_frame: usize,
     target_pending: usize,
     frame_count: u64,
 ) {
-    let pending_frames = pending.len() / bytes_per_frame;
+    let max_pending = target_pending * 5;
 
-    // 1. 先写入上次遗留的 pending 数据
-    if !pending.is_empty() {
-        if let Ok(available) = client.get_available_space_in_frames() {
-            if available > 0 {
-                let write_frames = (pending_frames as u32).min(available) as usize;
-                let write_bytes = write_frames * bytes_per_frame;
-                if write_bytes <= pending.len() {
-                    if let Err(e) = render.write_to_device(write_frames, &pending[..write_bytes], None) {
-                        log::warn!("Output pending write error: {:?}", e);
-                    } else {
-                        pending.drain(..write_bytes);
-                    }
-                }
-            }
+    // 1. 渐进式漂移补偿：pending 过高时按比例丢弃旧数据（每帧丢 10% 超额，分散到多帧）
+    let excess = pending.len().saturating_sub(target_pending * bytes_per_frame);
+    if excess > 0 {
+        // 每帧丢 10% 超额，避免一次性跳帧导致可感知的卡顿
+        let drop = (excess / 10).max(bytes_per_frame);
+        let drop = drop.min(pending.len());
+        pending.drain(..drop);
+        if frame_count % 2400 == 0 {
+            debug_log(&format!("DRIFT: dropped {} bytes, remaining pending={}", drop, pending.len()));
         }
     }
 
-    // 2. 时钟漂移补偿：当 pending 水位过高时跳过当前帧
-    let current_pending = pending.len() / bytes_per_frame;
-    if current_pending > target_pending * 3 {
-        if frame_count % 2400 == 0 {
-            debug_log(&format!("DRIFT SKIP: pending={} frames, skipping output", current_pending));
-        }
-    } else {
-        // 3. 写入当前帧数据
-        match client.get_available_space_in_frames() {
-            Ok(available) if available > 0 => {
-                let write_frames = (out_frames as u32).min(available) as usize;
+    // 2. 将当前帧追加到 pending，合并写入
+    pending.extend_from_slice(data);
+
+    // 3. 一次性写入设备（pending + 当前帧）
+    match client.get_available_space_in_frames() {
+        Ok(available) if available > 0 => {
+            let pending_frames = pending.len() / bytes_per_frame;
+            let write_frames = pending_frames.min(available as usize);
+            if write_frames > 0 {
                 let write_bytes = write_frames * bytes_per_frame;
-                if write_bytes <= data.len() {
-                    if let Err(e) = render.write_to_device(write_frames, &data[..write_bytes], None) {
+                if write_bytes <= pending.len() {
+                    if let Err(e) = render.write_to_device(write_frames, &pending[..write_bytes], None) {
                         log::warn!("Output write error: {:?}", e);
                     }
-                    if write_bytes < data.len() {
-                        pending.extend_from_slice(&data[write_bytes..data.len()]);
-                    }
+                    pending.drain(..write_bytes);
                 }
             }
-            Ok(_available) => {
-                let max_pending = target_pending * 5;
-                if current_pending < max_pending {
-                    pending.extend_from_slice(data);
-                }
+        }
+        Ok(_) => {
+            // 无可用空间，保留 pending 但限制上限
+            if pending.len() > max_pending * bytes_per_frame {
+                let excess = pending.len() - max_pending * bytes_per_frame;
+                pending.drain(..excess);
             }
-            Err(e) => {
-                log::warn!("get_available_space_in_frames error: {:?}", e);
-            }
+        }
+        Err(e) => {
+            log::warn!("get_available_space_in_frames error: {:?}", e);
         }
     }
 }
@@ -639,6 +640,7 @@ fn audio_loop(
     monitor_point: Arc<AtomicU32>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     app_handle: Option<AppHandle>,
+    bgm_skip_rate: Arc<AtomicU32>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
     debug_log("=== audio_loop started ===");
@@ -1278,6 +1280,19 @@ fn audio_loop(
                         output_bits, &output_sample_type,
                     );
                     let out_frames = out_bytes / output_bytes_per_frame;
+
+                    // ====== BGM 自适应漂移补偿：根据 output_pending 水位通知 BGM 线程调整采样率 ======
+                    if bgm_running.load(Ordering::Acquire) {
+                        let pending_frames = output_pending.len() / output_bytes_per_frame;
+                        let skip = if pending_frames > target_pending_frames * 2 {
+                            0.05  // 最大跳过 5%
+                        } else if pending_frames > target_pending_frames {
+                            ((pending_frames - target_pending_frames) as f32 / target_pending_frames as f32 * 0.05).max(0.001)
+                        } else {
+                            0.0
+                        };
+                        bgm_skip_rate.store(skip.to_bits(), Ordering::Relaxed);
+                    }
 
                     // ====== 输出写入：时钟漂移补偿 ======
                     write_output_with_drift(
