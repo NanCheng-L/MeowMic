@@ -33,6 +33,7 @@ export default {
     },
     desc: {
       RNNoise: 'Lightweight, best for continuous noise (fans, AC). Minimal CPU usage',
+      DeepFilterNet3: 'Deep noise suppression, excels at keyboard/mouse clicks. Stronger overall',
     },
     monitor: 'Monitor',
     monitorDesc: 'Hear your own denoised voice through headphones',

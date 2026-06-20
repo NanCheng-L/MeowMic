@@ -151,7 +151,10 @@ const loadConfig = () => {
       if (config.denoiseEnabled !== undefined) denoiseEnabled.value = config.denoiseEnabled
       if (config.denoiseStrength !== undefined) denoiseStrength.value = config.denoiseStrength
       if (config.micGain !== undefined) micGain.value = config.micGain
-      if (config.selectedModel) selectedModel.value = config.selectedModel
+      if (config.selectedModel) {
+        // 旧版模型名迁移
+        selectedModel.value = config.selectedModel === 'DeepFilterNet' ? 'DeepFilterNet3' : config.selectedModel
+      }
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
       if (config.monitorPoint !== undefined) monitorPoint.value = config.monitorPoint

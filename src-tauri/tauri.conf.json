@@ -37,7 +37,8 @@
     ],
     "resources": [
       "resources/models/*",
-      "resources/vb-cable/*"
+      "resources/vb-cable/*",
+      "resources/deepfilter/*"
     ],
     "windows": {
       "nsis": {

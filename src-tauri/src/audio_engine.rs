@@ -841,6 +841,7 @@ fn audio_loop(
     // ====== EQ 处理器初始化 ======
     let mut eq_processor = EqProcessor::new(48000);
     let mut last_eq_config: Option<EqConfig> = None;
+    let mut last_strength = -1.0f32; // 强制首次同步
     let current_eq_config = eq_config.read().clone();
     eq_config_dirty.store(false, Ordering::Release); // 初始读取后清除标记
     if current_eq_config.enabled {
@@ -941,6 +942,12 @@ fn audio_loop(
         loop_iteration += 1;
         let current_config = config.read().clone();
 
+        // DeepFilterNet: strength 变化时更新内部降噪强度
+        if (current_config.strength - last_strength).abs() > f32::EPSILON {
+            denoise.update_strength(current_config.strength);
+            last_strength = current_config.strength;
+        }
+
         match input_capture.read_from_device(&mut input_buffer) {
             Ok((frames_read, _flags)) => {
                 consecutive_read_errors = 0; // 重置错误计数
@@ -1037,9 +1044,10 @@ fn audio_loop(
                         chunk.clone()
                     };
 
-                    // Apply strength mixing
+                    // Apply strength mixing (仅对没有内部强度控制的模型生效)
+                    // DeepFilterNet 通过 atten_lim_db 内部控制强度，不需要外部混音
                     let mixed_samples: Vec<f32> =
-                        if current_config.enabled && current_config.strength < 1.0 {
+                        if current_config.enabled && current_config.strength < 1.0 && !denoise.has_internal_strength_control() {
                             output_frame
                                 .iter()
                                 .zip(chunk.iter())

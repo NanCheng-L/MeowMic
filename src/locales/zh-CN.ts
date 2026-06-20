@@ -33,6 +33,7 @@ export default {
     },
     desc: {
       RNNoise: '轻量级，擅长去除风扇、空调等持续噪音，CPU 占用极低',
+      DeepFilterNet3: '深度降噪，擅长消除键盘、鼠标等瞬态噪音，降噪效果更强',
     },
     monitor: '监听',
     monitorDesc: '开启后可通过耳机听到自己降噪后的声音',

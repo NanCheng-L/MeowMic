@@ -113,13 +113,14 @@ fn start_denoising(
     monitor_enabled: Option<bool>,
 ) -> Result<(), String> {
     // 优先用 Tauri 资源目录（build 模式），fallback 到源码目录（dev 模式）
+    // resource_dir 指向 resources/ 父目录（包含 models/、deepfilter/ 等子目录）
     let resource_dir = app.path().resource_dir().ok().map(|d| {
         let models_dir = d.join("models");
         if models_dir.join("denoise.onnx").exists() {
-            models_dir
+            d // build 模式：指向 resources/ 根
         } else {
-            // dev 模式：资源在 src-tauri/resources/models/
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("models")
+            // dev 模式：资源在 src-tauri/resources/
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")
         }
     });
     let engine = state.engine.lock();

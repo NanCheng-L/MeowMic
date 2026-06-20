@@ -7,13 +7,13 @@
 - **前端**：Vue 3 + TypeScript + Vite
 - **后端**：Rust (Tauri 2)
 - **音频 API**：WASAPI (Windows Audio Session API)
-- **降噪**：nnnoiseless（RNNoise）+ MeowMic（自训练 ONNX 模型，Rust 原生推理）
+- **降噪**：nnnoiseless（RNNoise）+ DeepFilterNet3（FFI 调用预编译 DLL）
 
 ## 降噪模型架构
 
 - **RNNoise**：原生 Rust 实现（nnnoiseless），<1ms，擅长持续噪声（风扇、空调）
-- **MeowMic**：自训练模型（ONNX），Rust 原生推理（ort crate），擅长瞬态噪声（键盘、鼠标）
-- 模型选择：RNNoise / MeowMic（本地 ONNX）
+- **DeepFilterNet3**：FFI 调用 `deepfilter_runtime_bridge.dll`，擅长瞬态噪声（键盘、鼠标），降噪能力更强
+- 模型选择：RNNoise / DeepFilterNet3
 - **虚拟音频设备**：VB-Audio Virtual Cable
 - **全局快捷键**：tauri-plugin-global-shortcut
 - **配置持久化**：tauri-plugin-store
@@ -40,8 +40,12 @@ src/                    # Vue 前端
   tutorial-main.ts      # 教程窗口入口
   eq-main.ts            # 均衡器窗口入口
 src-tauri/src/          # Rust 后端
-  audio_engine.rs       # WASAPI 音频引擎
-  denoise/              # 降噪模型（mod.rs trait + rnnoise.rs）
+  audio_engine.rs       # WASAPI 音频引擎（主循环 + 配置结构体）
+  audio_utils.rs        # 音频工具函数（格式转换、重采样、监听写入）
+  bgm.rs                # BGM 进程捕获（WASAPI Loopback）
+  debug.rs              # 调试日志（%TEMP%\meowmic-debug.log）
+  device.rs             # 设备查找
+  denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs FFI）
   eq.rs                 # EQ 均衡器（Biquad IIR 滤波器 + 10 段 Peaking EQ）
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
   lib.rs                # Tauri 命令注册 + 系统托盘 + 设置管理
@@ -132,6 +136,9 @@ scripts/                # 构建/发布辅助脚本
 - **BGM buffer 无条件 drain**：`audio_loop` 中消费 BGM 样本的 `bgm_buf.drain()` 必须在 `bgm_running` 为 true 时才执行。否则 BGM 关闭/重启期间，drain 会丢弃 channel 中残余的有效数据，导致 BGM 恢复时出现音频断裂
 - **Vue watcher 启动时序**：`onMounted` 中 `loadConfig()` 设置 ref 值会触发 watcher，但此时引擎可能尚未启动。watcher 中调用 `updateConfig()` 发送 invoke 到未运行的后端会产生未处理的 Promise rejection。必须加 `initialized` 守卫
 - **bgm_was_active 设置时机**：`bgm_was_active.store(true)` 必须在线程全部 spawn 成功后执行，不能在 spawn 前。否则任何 spawn 失败导致 `start_bgm` 返回 `Err` 后，标记残留为 true，下次引擎重启会反复尝试重启失败的 BGM
+- **DeepFilterNet 输入范围**：DLL 期望 [-1.0, 1.0] 标准化音频，但我们的管线使用 i16 范围 [-32768, 32767]。必须在 `process_frame` 中除以 32768 归一化后传入 DLL，输出再乘以 32768 还原。同时 `has_internal_strength_control()` 返回 true 避免外部 strength mixing 双重衰减
+- **DeepFilterNet reduce_mask**：DLL 的 `reduce_mask` 参数 0=NONE(Independent), 1=MAX, 2=MEAN。GUI 默认用 0，不要传 2
+- **nnnoiseless 输入范围**：RNNoise 期望 i16 范围 [-32768, 32767]，内部静音阈值按此校准。归一化到 [-1, 1] 会导致所有帧被判定为静音直接跳过，完全丧失降噪能力
 
 ## 版本号管理
 
