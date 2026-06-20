@@ -490,6 +490,16 @@ pub fn bgm_process_loop(
     pid: u32,
     skip_rate: Arc<AtomicU32>,
 ) -> Result<(), String> {
+    // 提升 BGM 线程到实时优先级，防止游戏抢占 CPU
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
+        }
+        SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
+    }
+
     debug_log(&format!("bgm_loop[{}]: initializing MTA", pid));
     let _ = initialize_mta().ok();
 

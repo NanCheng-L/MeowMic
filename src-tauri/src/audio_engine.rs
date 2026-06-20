@@ -506,56 +506,38 @@ fn format_output_bytes(
     out_bytes
 }
 
-// ====== 带时钟漂移补偿的 WASAPI 输出写入（渐进式） ======
-// 时钟漂移补偿：当 pending 水位过高时，每帧按比例丢弃少量旧数据（而非跳过整个帧），
-// 使调整分散到多帧，听感上几乎无感。同时始终写入当前帧，避免音频中断。
+// ====== 无缓冲直写 WASAPI 输出 ======
+// 不使用 pending 缓冲区：设备能写多少写多少，写不下的直接丢弃。
+// 避免 pending 在 0 和 target 之间振荡导致的颤音。
 fn write_output_with_drift(
     render: &AudioRenderClient,
     client: &AudioClient,
     data: &[u8],
     _out_frames: usize,
-    pending: &mut Vec<u8>,
+    _pending: &mut Vec<u8>,
     bytes_per_frame: usize,
-    target_pending: usize,
+    _target_pending: usize,
     frame_count: u64,
 ) {
-    let max_pending = target_pending * 5;
-
-    // 1. 渐进式漂移补偿：pending 过高时按比例丢弃旧数据（每帧丢 10% 超额，分散到多帧）
-    let excess = pending.len().saturating_sub(target_pending * bytes_per_frame);
-    if excess > 0 {
-        // 每帧丢 10% 超额，避免一次性跳帧导致可感知的卡顿
-        let drop = (excess / 10).max(bytes_per_frame);
-        let drop = drop.min(pending.len());
-        pending.drain(..drop);
-        if frame_count % 2400 == 0 {
-            debug_log(&format!("DRIFT: dropped {} bytes, remaining pending={}", drop, pending.len()));
-        }
-    }
-
-    // 2. 将当前帧追加到 pending，合并写入
-    pending.extend_from_slice(data);
-
-    // 3. 一次性写入设备（pending + 当前帧）
     match client.get_available_space_in_frames() {
         Ok(available) if available > 0 => {
-            let pending_frames = pending.len() / bytes_per_frame;
-            let write_frames = pending_frames.min(available as usize);
-            if write_frames > 0 {
-                let write_bytes = write_frames * bytes_per_frame;
-                if write_bytes <= pending.len() {
-                    if let Err(e) = render.write_to_device(write_frames, &pending[..write_bytes], None) {
-                        log::warn!("Output write error: {:?}", e);
-                    }
-                    pending.drain(..write_bytes);
+            let data_frames = data.len() / bytes_per_frame;
+            let write_frames = data_frames.min(available as usize);
+            let write_bytes = write_frames * bytes_per_frame;
+            if write_bytes <= data.len() && write_bytes > 0 {
+                if let Err(e) = render.write_to_device(write_frames, &data[..write_bytes], None) {
+                    log::warn!("Output write error: {:?}", e);
+                }
+                // 写不下的部分直接丢弃，不堆积
+                if write_bytes < data.len() && frame_count % 2400 == 0 {
+                    debug_log(&format!("DRIFT: dropped {} bytes (device full)", data.len() - write_bytes));
                 }
             }
         }
         Ok(_) => {
-            // 无可用空间，保留 pending 但限制上限
-            if pending.len() > max_pending * bytes_per_frame {
-                let excess = pending.len() - max_pending * bytes_per_frame;
-                pending.drain(..excess);
+            // 设备缓冲区满，丢弃当前帧
+            if frame_count % 2400 == 0 {
+                debug_log("DRIFT: device buffer full, dropped entire frame");
             }
         }
         Err(e) => {
@@ -582,16 +564,15 @@ fn log_diagnostics(
     eq_enabled: bool,
     bgm_active: bool,
     output_client: &AudioClient,
-    output_bytes_per_frame: usize,
-    pending_len: usize,
-    target_pending: usize,
+    _output_bytes_per_frame: usize,
+    _pending_len: usize,
+    _target_pending: usize,
     out_frames: usize,
 ) {
     // 每 5 秒记录输出缓冲区状态
     if frame_count % 2400 == 0 {
         if let Ok(available) = output_client.get_available_space_in_frames() {
-            let drift_status = if pending_len / output_bytes_per_frame > target_pending * 3 { "SKIP" } else { "ok" };
-            debug_log(&format!("OUT_BUF frame={} available={} pending={} out_frames={} drift={}", frame_count, available, pending_len / output_bytes_per_frame, out_frames, drift_status));
+            debug_log(&format!("OUT_BUF frame={} available={} out_frames={}", frame_count, available, out_frames));
         }
     }
 
@@ -643,6 +624,18 @@ fn audio_loop(
     bgm_skip_rate: Arc<AtomicU32>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
+
+    // 提升音频线程到实时优先级，防止游戏抢占 CPU 导致颤音
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
+        }
+        // THREAD_PRIORITY_TIME_CRITICAL = 15
+        SetThreadPriority(GetCurrentThread(), 15);
+    }
+
     debug_log("=== audio_loop started ===");
 
     let input_device = find_device(input_device_name.as_deref(), true)
