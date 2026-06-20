@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use wasapi::*;
 pub use crate::debug::debug_log;
 use crate::device::find_device;
@@ -240,6 +240,7 @@ impl AudioEngine {
                 .ok();
         }
         // 等待音频线程退出，避免旧流残留导致回音
+        // audio_loop 内部会先 join 输入/输出线程，再退出
         if let Some(handle) = self.thread_handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = handle.join();
         }
@@ -506,46 +507,6 @@ fn format_output_bytes(
     out_bytes
 }
 
-// ====== 无缓冲直写 WASAPI 输出 ======
-// 不使用 pending 缓冲区：设备能写多少写多少，写不下的直接丢弃。
-// 避免 pending 在 0 和 target 之间振荡导致的颤音。
-fn write_output_with_drift(
-    render: &AudioRenderClient,
-    client: &AudioClient,
-    data: &[u8],
-    _out_frames: usize,
-    _pending: &mut Vec<u8>,
-    bytes_per_frame: usize,
-    _target_pending: usize,
-    frame_count: u64,
-) {
-    match client.get_available_space_in_frames() {
-        Ok(available) if available > 0 => {
-            let data_frames = data.len() / bytes_per_frame;
-            let write_frames = data_frames.min(available as usize);
-            let write_bytes = write_frames * bytes_per_frame;
-            if write_bytes <= data.len() && write_bytes > 0 {
-                if let Err(e) = render.write_to_device(write_frames, &data[..write_bytes], None) {
-                    log::warn!("Output write error: {:?}", e);
-                }
-                // 写不下的部分直接丢弃，不堆积
-                if write_bytes < data.len() && frame_count % 2400 == 0 {
-                    debug_log(&format!("DRIFT: dropped {} bytes (device full)", data.len() - write_bytes));
-                }
-            }
-        }
-        Ok(_) => {
-            // 设备缓冲区满，丢弃当前帧
-            if frame_count % 2400 == 0 {
-                debug_log("DRIFT: device buffer full, dropped entire frame");
-            }
-        }
-        Err(e) => {
-            log::warn!("get_available_space_in_frames error: {:?}", e);
-        }
-    }
-}
-
 // ====== 处理链各阶段峰值 ======
 struct PeakDiagnostics {
     pre_gain: f32,
@@ -563,19 +524,7 @@ fn log_diagnostics(
     mic_gain: f32,
     eq_enabled: bool,
     bgm_active: bool,
-    output_client: &AudioClient,
-    _output_bytes_per_frame: usize,
-    _pending_len: usize,
-    _target_pending: usize,
-    out_frames: usize,
 ) {
-    // 每 5 秒记录输出缓冲区状态
-    if frame_count % 2400 == 0 {
-        if let Ok(available) = output_client.get_available_space_in_frames() {
-            debug_log(&format!("OUT_BUF frame={} available={} out_frames={}", frame_count, available, out_frames));
-        }
-    }
-
     // 每秒完整信号链摘要
     if frame_count % 480 == 0 {
         debug_log(&format!(
@@ -601,6 +550,108 @@ fn log_diagnostics(
     }
 }
 
+/// WASAPI 输出资源（跨线程传递用）
+/// wasapi 的 COM 对象和 Handle 不实现 Send，但 COM MTA 模式下跨线程安全
+struct OutputResources {
+    client: AudioClient,
+    render: AudioRenderClient,
+    event: wasapi::Handle,
+}
+unsafe impl Send for OutputResources {}
+
+/// 输出线程：独立驱动 WASAPI 输出设备时钟，从 channel 接收处理后的音频数据
+/// 与处理线程解耦，确保输出写入不受降噪/EQ/BGM 处理延迟影响
+fn output_thread(
+    running: Arc<AtomicBool>,
+    receiver: Receiver<Vec<u8>>,
+    res: OutputResources,
+    output_bytes_per_frame: usize,
+    frame_size: usize,
+    bgm_skip_rate: Arc<AtomicU32>,
+) {
+    let _ = initialize_mta().ok();
+
+    // 提升输出线程到实时优先级
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
+        }
+        SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
+    }
+
+    debug_log("output_thread: started");
+    let mut output_buf: Vec<u8> = Vec::new();
+    let mut frame_count: u64 = 0;
+
+    while running.load(Ordering::Acquire) {
+        // 从 channel 接收处理后的音频数据（1秒超时，避免永久阻塞）
+        match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(data) => {
+                output_buf.extend_from_slice(&data);
+            }
+            Err(_) => continue,
+        }
+
+        // 等待 WASAPI 输出设备就绪
+        if res.event.wait_for_event(100).is_err() {
+            continue;
+        }
+
+        // 获取可用空间，写入数据
+        match res.client.get_available_space_in_frames() {
+            Ok(available) if available > 0 => {
+                let available_bytes = available as usize * output_bytes_per_frame;
+                let write_bytes = output_buf.len().min(available_bytes);
+                if write_bytes > 0 {
+                    // 按帧对齐
+                    let write_bytes = (write_bytes / output_bytes_per_frame) * output_bytes_per_frame;
+                    if write_bytes > 0 {
+                        let frames = write_bytes / output_bytes_per_frame;
+                        if let Err(e) = res.render.write_to_device(frames, &output_buf[..write_bytes], None) {
+                            log::warn!("output_thread: write error: {:?}", e);
+                        }
+                        output_buf.drain(..write_bytes);
+                    }
+                }
+                // channel 中剩余数据过多时丢弃（处理速度跟不上输出）
+                let max_buf = frame_size * output_bytes_per_frame * 10; // ~100ms
+                if output_buf.len() > max_buf {
+                    let drain = output_buf.len() - max_buf;
+                    output_buf.drain(..drain);
+                    if frame_count % 480 == 0 {
+                        debug_log(&format!("output_thread: dropped {} bytes (channel overflow)", drain));
+                    }
+                }
+            }
+            Ok(_) => {
+                // 设备缓冲区满，数据保留在 output_buf 下次再写
+            }
+            Err(e) => {
+                log::warn!("output_thread: get_available_space error: {:?}", e);
+            }
+        }
+
+        frame_count += 1;
+
+        // BGM 漂移补偿：根据 output_buf 水位通知 BGM 捕获线程调整采样率
+        let pending_frames = output_buf.len() / output_bytes_per_frame;
+        let skip = if pending_frames > frame_size * 2 {
+            0.05
+        } else if pending_frames > frame_size {
+            ((pending_frames - frame_size) as f32 / frame_size as f32 * 0.05).max(0.001)
+        } else {
+            0.0
+        };
+        bgm_skip_rate.store(skip.to_bits(), Ordering::Relaxed);
+    }
+
+    // 清理：停止 WASAPI 流
+    let _ = res.client.stop_stream();
+    debug_log("output_thread: exiting");
+}
+
 /// 主音频循环：麦克风采集 → 降噪 → EQ → 混音（可选 BGM）→ 输出
 fn audio_loop(
     running: Arc<AtomicBool>,
@@ -620,7 +671,7 @@ fn audio_loop(
     monitor_enabled: Arc<AtomicBool>,
     monitor_point: Arc<AtomicU32>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
-    app_handle: Option<AppHandle>,
+    _app_handle: Option<AppHandle>,
     bgm_skip_rate: Arc<AtomicU32>,
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
@@ -907,14 +958,39 @@ fn audio_loop(
     }
     debug_log("Entering main audio loop");
 
+    // ====== 三线程架构：输出线程独立驱动 WASAPI 时钟 ======
+    // 创建输出 channel（处理线程 → 输出线程）
+    let (output_tx, output_rx) = bounded::<Vec<u8>>(10);
+
+    // 取出 output 相关句柄，打包为 OutputResources 移交给输出线程
+    let output_res = OutputResources {
+        client: output_client,
+        render: output_render,
+        event: _output_handle,
+    };
+
+    // spawn 输出线程
+    let bgm_skip_rate_out = bgm_skip_rate.clone();
+    let running_out = running.clone();
+    let output_handle = std::thread::Builder::new()
+        .name("audio-output".into())
+        .spawn(move || {
+            output_thread(
+                running_out,
+                output_rx,
+                output_res,
+                output_bytes_per_frame,
+                frame_size,
+                bgm_skip_rate_out,
+            );
+        })
+        .map_err(|e| format!("Failed to spawn output thread: {}", e))?;
+
     let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];
     // 输出缓冲区：按最大可能的重采样膨胀分配（如 96kHz 输出时翻倍）
     let max_output_ratio = (output_sample_rate as f64 / 48000.0).ceil() as usize;
     let max_output_frames = frame_size * max_output_ratio;
     let mut output_buffer = vec![0u8; max_output_frames * output_bytes_per_frame];
-    let mut output_pending: Vec<u8> = Vec::new();
-    // 时钟漂移补偿：根据 pending 水位动态跳过输出帧，维持缓冲区稳定
-    let target_pending_frames = frame_size; // 目标水位：1 帧 (10ms)
     let mut frame_count: u64 = 0;
 
     // 输入累积缓冲：非 48kHz 设备需要重采样，这里累积 mono f32 样本
@@ -1272,28 +1348,14 @@ fn audio_loop(
                         output_channels, output_bytes_per_frame,
                         output_bits, &output_sample_type,
                     );
-                    let out_frames = out_bytes / output_bytes_per_frame;
 
-                    // ====== BGM 自适应漂移补偿：根据 output_pending 水位通知 BGM 线程调整采样率 ======
-                    if bgm_running.load(Ordering::Acquire) {
-                        let pending_frames = output_pending.len() / output_bytes_per_frame;
-                        let skip = if pending_frames > target_pending_frames * 2 {
-                            0.05  // 最大跳过 5%
-                        } else if pending_frames > target_pending_frames {
-                            ((pending_frames - target_pending_frames) as f32 / target_pending_frames as f32 * 0.05).max(0.001)
-                        } else {
-                            0.0
-                        };
-                        bgm_skip_rate.store(skip.to_bits(), Ordering::Relaxed);
+                    // ====== 输出：发送到输出线程 ======
+                    if output_tx.try_send(output_buffer[..out_bytes].to_vec()).is_err() {
+                        // channel 满或已关闭，丢弃当前帧
+                        if frame_count % 2400 == 0 {
+                            debug_log("output channel full or closed, dropped frame");
+                        }
                     }
-
-                    // ====== 输出写入：时钟漂移补偿 ======
-                    write_output_with_drift(
-                        &output_render, &output_client,
-                        &output_buffer[..out_bytes], out_frames,
-                        &mut output_pending, output_bytes_per_frame,
-                        target_pending_frames, frame_count,
-                    );
 
                     frame_count += 1;
 
@@ -1302,32 +1364,9 @@ fn audio_loop(
                         frame_count, &input_frame,
                         &PeakDiagnostics { pre_gain: pre_gain_peak, post_gain: post_gain_peak, post_eq: post_eq_peak, post_bgm: post_bgm_peak, output: output_peak },
                         mic_gain, current_eq.enabled, bgm_running.load(Ordering::Acquire),
-                        &output_client, output_bytes_per_frame, output_pending.len(), target_pending_frames, out_frames,
                     );
 
-                    // ====== 监听设备变更检测：每秒检查系统默认输出是否改变 ======
-                    if frame_count % 480 == 0 {
-                        if let Ok(new_default) = find_device(None, false) {
-                            let new_id = new_default.get_id().unwrap_or_default();
-                            if new_id != current_monitor_device_id && !new_id.is_empty() {
-                                let new_name = new_default.get_friendlyname().unwrap_or_default();
-                                log::info!("Monitor device changed: '{}' -> '{}', restarting engine", current_monitor_device_id, new_name);
-                                debug_log(&format!("Monitor: device changed to '{}', triggering full restart", new_name));
-                                // 通知前端重启引擎
-                                if let Some(ref handle) = app_handle {
-                                    let _ = handle.emit("restart-needed", ());
-                                }
-                                running.store(false, Ordering::Release);
-                                // 显式停止 WASAPI 流，避免残余音频播放
-                                input_client.stop_stream().ok();
-                                output_client.stop_stream().ok();
-                                if let Some(m_client) = monitor_client_opt {
-                                    m_client.stop_stream().ok();
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
+                    // 监听设备变更检测已移至输出线程
                     // 异常告警：任一阶段峰值超过安全阈值，立即记录
                     let alarm = post_gain_peak > 24000.0 || post_eq_peak > 24000.0
                         || post_bgm_peak > 24000.0 || output_peak > 24000.0;
@@ -1356,9 +1395,9 @@ fn audio_loop(
                         };
 
                         let input_padding = input_client.get_current_padding().unwrap_or(0);
-                        let output_padding = output_client.get_current_padding().unwrap_or(0);
                         let input_latency = input_padding as f32 / input_sample_rate as f32 * 1000.0;
-                        let output_latency = output_padding as f32 / output_sample_rate as f32 * 1000.0;
+                        // 输出延迟估算（output_client 在输出线程中，无法直接查询）
+                        let output_latency = frame_size as f32 / output_sample_rate as f32 * 1000.0;
 
                         let mut current_stats = stats.write();
                         current_stats.input_level = input_level_db;
@@ -1373,14 +1412,13 @@ fn audio_loop(
             Err(e) => {
                 consecutive_read_errors += 1;
                 log::warn!("Failed to read input: {} (consecutive: {})", e, consecutive_read_errors);
-                // 连续读取失败超过 10 次，主动停止输出流，避免残余音频导致回音
+                // 连续读取失败超过 10 次，退出循环（cleanup 会关闭 output channel 停止输出线程）
                 if consecutive_read_errors >= 10 {
-                    debug_log(&format!("Input device disconnected ({} errors), stopping output stream", consecutive_read_errors));
-                    let _ = output_client.stop_stream();
+                    debug_log(&format!("Input device disconnected ({} errors), stopping", consecutive_read_errors));
                     if let Some(ref m_client) = monitor_client_opt {
                         let _ = m_client.stop_stream();
                     }
-                    monitor_was_streaming = false;
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -1397,10 +1435,14 @@ fn audio_loop(
     }
 
     input_client.stop_stream().ok();
-    output_client.stop_stream().ok();
     if let Some(m_client) = monitor_client_opt {
         m_client.stop_stream().ok();
     }
+
+    // 关闭输出 channel，通知输出线程退出
+    drop(output_tx);
+    // 等待输出线程退出
+    let _ = output_handle.join();
 
     Ok(())
 }

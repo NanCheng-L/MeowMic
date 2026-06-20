@@ -14,6 +14,28 @@
 - **RNNoise**：原生 Rust 实现（nnnoiseless），<1ms，擅长持续噪声（风扇、空调）
 - **DeepFilterNet3**：FFI 调用 `deepfilter_runtime_bridge.dll`，擅长瞬态噪声（键盘、鼠标），降噪能力更强
 - 模型选择：RNNoise / DeepFilterNet3
+
+## 音频线程架构（三线程解耦）
+
+音频引擎使用三线程架构，解决游戏等高 CPU 负载场景下的颤音问题：
+
+```
+输入线程 (audio_loop 主线程)
+  │ WASAPI input event → read_from_device → process_input
+  │ crossbeam bounded(10) channel
+  ▼
+处理线程 (audio_loop 主线程，与输入同线程)
+  │ denoise → strength → gain → EQ → explode → BGM mix → limiter
+  │ crossbeam bounded(10) channel
+  ▼
+输出线程 (独立线程，THREAD_PRIORITY_TIME_CRITICAL)
+  │ WASAPI output event → try_recv → write_to_device
+  │ 丢弃溢出数据，超时写静音
+```
+
+- **输出线程**独立驱动 WASAPI 时钟，不受处理延迟影响
+- `OutputResources` 结构体封装 `AudioClient + AudioRenderClient + wasapi::Handle`，通过 `unsafe impl Send` 跨线程传递
+- BGM 漂移补偿由输出线程根据 `output_buf` 水位计算，写入 `bgm_skip_rate` AtomicU32
 - **虚拟音频设备**：VB-Audio Virtual Cable
 - **全局快捷键**：tauri-plugin-global-shortcut
 - **配置持久化**：tauri-plugin-store
@@ -89,7 +111,8 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI 监听停止**：关闭监听时仅跳过写入不够，WASAPI 缓冲区残余音频会继续播放。必须调用 `stop_stream()` 立即停止，并用 `monitor_was_streaming` 标记避免每帧重复 stop/start
 - **BGM 混音开关**：无进程时应允许打开开关（仅不启动混音），选中进程后自动开始。否则用户会误以为功能损坏
 - **WASAPI 同设备冲突**：同一 USB 设备的输入输出端点（如 K7 麦克风 + K7 耳机）同时打开会导致 `read_from_device` 持续返回 0 帧。原因：共享模式下同一物理设备的 Capture/Render 端点共享时钟，缓冲区竞争死锁。解决：检测连续 100 次 0 帧读取后返回 `AUDIO_DEVICE_CONFLICT` 错误，前端自动切换输出设备
-- **WASAPI 设备断开回音**：设备断开时输入流失败但输出流继续播放残余数据导致回音。解决：连续 10 次读取失败后主动调用 `output_client.stop_stream()` 停止输出，避免残余音频播放
+- **WASAPI 设备断开回音**：设备断开时输入流失败但输出流继续播放残余数据导致回音。解决：连续 10 次读取失败后 break 退出循环，cleanup 代码关闭 output channel 通知输出线程退出
+- **WASAPI 跨线程传递**：`wasapi` crate 的 COM 对象（`AudioClient`、`AudioRenderClient`）和 `Handle` 不实现 `Send`（含 `*mut c_void`）。在 COM MTA 模式下跨线程安全，需用 newtype wrapper + `unsafe impl Send` 封装（如 `OutputResources`）
 - **WASAPI 首次启动预热**：打包后首次启动，WASAPI 设备可能需要几帧才能进入稳定状态，前几帧可能是空数据。解决：启动后预热最多 3 次（每次 300ms），检测到非零信号才进入主循环；预热失败则重启流重试
 - **打包调试日志**：`env_logger::init()` 在打包后无输出。用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，格式 `[elapsed] message`
 - **增益控制位置**：`mic_gain` 必须在降噪**之后**应用（`audio_loop` 中 denoise 输出 → strength mixing → mic_gain），放在降噪前会放大噪音导致降噪效果变差
