@@ -32,6 +32,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 log = "0.4"
 env_logger = "0.11"
+chrono = "0.4"
 muda = "0.19"
 nnnoiseless = { version = "0.5.2", default-features = false }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }

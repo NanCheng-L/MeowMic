@@ -39,7 +39,7 @@ export default {
     monitorPoint: 'Monitor Point',
     monitorPoints: {
       off: 'Off',
-      raw: 'Raw Input',
+      raw: 'Pre-Denoise',
       denoised: 'After Denoise',
       gain: 'After Gain',
       eq: 'After EQ',

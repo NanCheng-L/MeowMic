@@ -5,19 +5,13 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use wasapi::*;
-
-/// 写入调试日志到文件（打包后可用）
-pub fn debug_log(msg: &str) {
-    use std::io::Write;
-    let log_path = std::env::temp_dir().join("meowmic-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-        let elapsed = std::time::Instant::now().elapsed();
-        let _ = writeln!(f, "[{:?}] {}", elapsed, msg);
-    }
-}
+pub use crate::debug::debug_log;
+use crate::device::find_device;
+pub use crate::audio_utils::{calculate_rms, compute_spectrum, write_to_monitor, resample_linear, bytes_to_f32_samples, downmix_to_mono, upmix_to_stereo};
+pub use crate::bgm::list_audio_processes;
+pub use crate::bgm::bgm_process_loop;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenoiseConfig {
@@ -416,646 +410,213 @@ impl AudioEngine {
     }
 }
 
-/// 列出正在播放音频的进程（使用 IAudioSessionManager2 枚举所有活跃音频会话）
-#[cfg(windows)]
-fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
-    use std::collections::HashSet;
-    use windows::core::*;
-    use windows::Win32::System::Com::*;
-    use windows::Win32::Media::Audio::*;
-    use windows::Win32::System::Diagnostics::ToolHelp::*;
+// BGM 相关代码（list_audio_processes, bgm_process_loop, APP_NAME_MAP 等）已移至 bgm.rs
 
-    // 第一步：用 ToolHelp 构建 pid → exe全路径 的映射，用于读取版本信息
-    let mut pid_to_path: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    let mut pid_to_exe: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    unsafe {
-        if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..std::mem::zeroed()
-            };
-            if Process32FirstW(snapshot, &mut entry).is_ok() {
-                loop {
-                    let pid = entry.th32ProcessID;
-                    let exe = String::from_utf16_lossy(
-                        &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0)],
-                    );
-                    pid_to_exe.insert(pid, exe.clone());
-                    // 用 Module32First 获取 exe 全路径
-                    let mut mod_entry = MODULEENTRY32W {
-                        dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
-                        ..std::mem::zeroed()
-                    };
-                    if let Ok(mod_snap) = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) {
-                        if Module32FirstW(mod_snap, &mut mod_entry).is_ok() {
-                            let path = String::from_utf16_lossy(
-                                &mod_entry.szExePath[..mod_entry.szExePath.iter().position(|&c| c == 0).unwrap_or(0)],
-                            );
-                            pid_to_path.insert(pid, path);
-                        }
-                        let _ = windows::Win32::Foundation::CloseHandle(mod_snap);
-                    }
-                    if Process32NextW(snapshot, &mut entry).is_err() {
-                        break;
-                    }
+// ====== 音频处理链：将原始字节转为 f32 mono 48kHz ======
+fn process_input(
+    raw_bytes: &[u8],
+    bits: u16,
+    sample_type: &SampleType,
+    channels: usize,
+    sample_rate: u32,
+) -> Vec<f32> {
+    let raw_samples = bytes_to_f32_samples(raw_bytes, bits, sample_type, channels);
+    let mono = downmix_to_mono(&raw_samples, channels);
+    if sample_rate != 48000 {
+        resample_linear(&mono, sample_rate, 48000)
+    } else {
+        mono
+    }
+}
+
+// ====== 将 f32 mono 样本格式化为输出设备字节 ======
+fn format_output_bytes(
+    samples: &[f32],
+    buffer: &mut [u8],
+    channels: usize,
+    bytes_per_frame: usize,
+    bits: u16,
+    sample_type: &SampleType,
+) -> usize {
+    let stereo = upmix_to_stereo(samples, channels);
+    let out_frames = stereo.len() / channels;
+    let out_bytes = out_frames * bytes_per_frame;
+    buffer[..out_bytes].fill(0);
+    for (i, &sample) in stereo.iter().enumerate() {
+        let byte_pos = i * (bytes_per_frame / channels);
+        match (bits, sample_type) {
+            (8, SampleType::Int) => {
+                let val = ((sample / 128.0) + 128.0).clamp(0.0, 255.0) as u8;
+                if byte_pos < buffer.len() { buffer[byte_pos] = val; }
+            }
+            (16, SampleType::Int) => {
+                let val = sample.clamp(-32768.0, 32767.0) as i16;
+                let bytes = val.to_le_bytes();
+                if byte_pos + 1 < buffer.len() {
+                    buffer[byte_pos] = bytes[0];
+                    buffer[byte_pos + 1] = bytes[1];
                 }
             }
-            let _ = windows::Win32::Foundation::CloseHandle(snapshot);
-        }
-    }
-
-    // 第二步：用 IAudioSessionManager2 获取所有有音频会话的进程（包括暂停的）
-    let my_pid = std::process::id();
-    let mut active_pids: Vec<u32> = Vec::new();
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
-
-        if let Ok(device_enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(
-            &MMDeviceEnumerator,
-            None,
-            CLSCTX_ALL,
-        ) {
-            if let Ok(default_device) = device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-                if let Ok(session_manager) = default_device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                    if let Ok(session_enumerator) = session_manager.GetSessionEnumerator() {
-                        if let Ok(count) = session_enumerator.GetCount() {
-                            for i in 0..count {
-                                if let Ok(control) = session_enumerator.GetSession(i) {
-                                    if let Ok(simple) = control.cast::<IAudioSessionControl2>() {
-                                        if let Ok(pid) = simple.GetProcessId() {
-                                            let pid = pid as u32;
-                                            if pid > 0 && pid != my_pid {
-                                                let state = control.GetState().unwrap_or(AudioSessionState(0));
-                                                // 活跃会话直接加入；非活跃会话只加入已知播放器
-                                                if state == AudioSessionState(1) {
-                                                    active_pids.push(pid);
-                                                } else {
-                                                    // 检查 exe 名是否匹配已知播放器
-                                                    let exe = pid_to_exe.get(&pid).cloned().unwrap_or_default();
-                                                    let exe_lower = exe.to_lowercase();
-                                                    let is_known_player = APP_NAME_MAP.iter().any(|(key, _)| exe_lower.contains(*key));
-                                                    if is_known_player {
-                                                        active_pids.push(pid);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            (24, SampleType::Int) => {
+                let val = (sample * 256.0).clamp(-8388608.0, 8388607.0) as i32;
+                if byte_pos + 2 < buffer.len() {
+                    buffer[byte_pos] = (val & 0xFF) as u8;
+                    buffer[byte_pos + 1] = ((val >> 8) & 0xFF) as u8;
+                    buffer[byte_pos + 2] = ((val >> 16) & 0xFF) as u8;
+                }
+            }
+            (32, SampleType::Int) => {
+                let val = (sample * 65536.0).clamp(-2147483648.0, 2147483647.0) as i32;
+                let bytes = val.to_le_bytes();
+                if byte_pos + 3 < buffer.len() {
+                    buffer[byte_pos..byte_pos + 4].copy_from_slice(&bytes);
+                }
+            }
+            (32, SampleType::Float) => {
+                let val = (sample / 32767.0).clamp(-1.0, 1.0);
+                let bytes = val.to_le_bytes();
+                if byte_pos + 3 < buffer.len() {
+                    buffer[byte_pos..byte_pos + 4].copy_from_slice(&bytes);
+                }
+            }
+            (64, SampleType::Float) => {
+                let val = (sample as f64 / 32767.0).clamp(-1.0, 1.0);
+                let bytes = val.to_le_bytes();
+                if byte_pos + 7 < buffer.len() {
+                    buffer[byte_pos..byte_pos + 8].copy_from_slice(&bytes);
+                }
+            }
+            _ => {
+                let val = sample.clamp(-32768.0, 32767.0) as i16;
+                let bytes = val.to_le_bytes();
+                if byte_pos + 1 < buffer.len() {
+                    buffer[byte_pos] = bytes[0];
+                    buffer[byte_pos + 1] = bytes[1];
                 }
             }
         }
     }
-
-    // 第三步：合并结果
-    let mut processes = Vec::new();
-    let mut seen_pids: HashSet<u32> = HashSet::new();
-    let mut seen_names: HashSet<String> = HashSet::new();
-    for pid in active_pids {
-        if seen_pids.contains(&pid) {
-            continue;
-        }
-        seen_pids.insert(pid);
-        let exe = pid_to_exe.get(&pid).cloned().unwrap_or_default();
-        let exe_lower = exe.to_lowercase();
-
-        // 优先级：映射表 > 窗口标题清理 > FileDescription > 注册表 > ProductName > exe名
-        // 映射表：找所有匹配项，选最长的 key（最具体的）
-        let friendly = APP_NAME_MAP.iter()
-            .filter(|(key, _)| exe_lower.contains(*key))
-            .max_by_key(|(key, _)| key.len())
-            .map(|(_, name)| name.to_string())
-            .or_else(|| {
-                get_window_title_for_pid(pid)
-                    .map(|t| clean_window_title(&t))
-                    .filter(|s| !s.is_empty() && s.len() > 1)
-            })
-            .or_else(|| {
-                pid_to_path.get(&pid).and_then(|path| get_file_description(path))
-            })
-            .or_else(|| {
-                let exe_name = exe.strip_suffix(".exe").unwrap_or(&exe);
-                get_app_display_name_from_registry(exe_name)
-            })
-            .or_else(|| {
-                pid_to_path.get(&pid).and_then(|path| get_product_name_from_path(path))
-            })
-            .unwrap_or_else(|| exe.strip_suffix(".exe").unwrap_or(&exe).to_string());
-
-        // 过滤空名称和重复名称
-        if friendly.is_empty() || seen_names.contains(&friendly) {
-            continue;
-        }
-        seen_names.insert(friendly.clone());
-
-        processes.push((friendly, exe, pid));
-    }
-
-    Ok(processes)
+    out_bytes
 }
 
-/// 常见应用兜底映射（exe名包含匹配，长的优先）
-const APP_NAME_MAP: &[(&str, &str)] = &[
-    ("qqbrowser", "QQ 浏览器"),
-    ("cloudmusic", "网易云音乐"),
-    ("qqmusic", "QQ 音乐"),
-    ("kugou", "酷狗音乐"),
-    ("kwmusic", "酷我音乐"),
-    ("kuwo", "酷我音乐"),
-    ("musicbee", "MusicBee"),
-    ("foobar", "foobar2000"),
-    ("winamp", "Winamp"),
-    ("potplayer", "PotPlayer"),
-    ("spotify", "Spotify"),
-    ("douyin", "抖音"),
-    ("weixin", "微信"),
-    ("wechat", "微信"),
-    ("obs64", "OBS Studio"),
-    ("obs32", "OBS Studio"),
-    ("itunes", "iTunes"),
-    ("aimp", "AIMP"),
-    ("chrome", "Chrome"),
-    ("msedge", "Edge"),
-    ("firefox", "Firefox"),
-    ("steam", "Steam"),
-    ("qq", "QQ"),
-];
+// ====== 带时钟漂移补偿的 WASAPI 输出写入 ======
+fn write_output_with_drift(
+    render: &AudioRenderClient,
+    client: &AudioClient,
+    data: &[u8],
+    out_frames: usize,
+    pending: &mut Vec<u8>,
+    bytes_per_frame: usize,
+    target_pending: usize,
+    frame_count: u64,
+) {
+    let pending_frames = pending.len() / bytes_per_frame;
 
-/// 清理窗口标题，去掉动态后缀
-fn clean_window_title(title: &str) -> String {
-    let mut result = title.to_string();
-
-    // 去掉 " - " 后面的内容（OBS: "OBS 32.1.2 - 配置文件: xxx - 场景: xxx"）
-    if let Some(pos) = result.find(" - ") {
-        let prefix = result[..pos].to_string();
-        if prefix.len() >= 2 {
-            result = prefix;
-        }
-    }
-
-    // 去掉末尾的版本号（如 "OBS 32.1.2" → "OBS"）
-    // 手动匹配：从末尾往前找 " 数字.数字(.数字)"
-    if let Some(last_space) = result.rfind(' ') {
-        let after_space = &result[last_space + 1..];
-        let parts: Vec<&str> = after_space.split('.').collect();
-        if parts.len() >= 2 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())) {
-            result = result[..last_space].to_string();
-        }
-    }
-
-    result
-}
-
-/// 获取进程主窗口的标题（本地化名称）
-#[cfg(windows)]
-fn get_window_title_for_pid(pid: u32) -> Option<String> {
-    extern "system" {
-        pub fn EnumWindows(
-            callback: *mut core::ffi::c_void,
-            lparam: isize,
-        ) -> windows::Win32::Foundation::BOOL;
-        pub fn GetWindowThreadProcessId(
-            hwnd: windows::Win32::Foundation::HWND,
-            process_id: *mut u32,
-        ) -> u32;
-        pub fn GetWindowTextW(
-            hwnd: windows::Win32::Foundation::HWND,
-            buf: *mut u16,
-            max_count: i32,
-        ) -> i32;
-        pub fn IsWindowVisible(hwnd: windows::Win32::Foundation::HWND) -> windows::Win32::Foundation::BOOL;
-    }
-
-    struct EnumCtx {
-        target_pid: u32,
-        found_title: Option<String>,
-    }
-
-    unsafe extern "system" fn enum_callback(hwnd: windows::Win32::Foundation::HWND, lparam: isize) -> windows::Win32::Foundation::BOOL {
-        let ctx = &mut *(lparam as *mut EnumCtx);
-        let mut window_pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, &mut window_pid);
-        if window_pid == ctx.target_pid && IsWindowVisible(hwnd).as_bool() {
-            let mut buf = [0u16; 256];
-            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
-            if len > 0 {
-                let title = String::from_utf16_lossy(&buf[..len as usize]);
-                if !title.is_empty() {
-                    ctx.found_title = Some(title);
-                }
-            }
-        }
-        windows::Win32::Foundation::BOOL(1) // continue enumeration
-    }
-
-    unsafe {
-        let mut ctx = EnumCtx { target_pid: pid, found_title: None };
-        let _ = EnumWindows(
-            enum_callback as *mut _,
-            &mut ctx as *mut _ as isize,
-        );
-        ctx.found_title
-    }
-}
-
-/// 从 exe 版本信息中读取 FileDescription（比 ProductName 更准确）
-#[cfg(windows)]
-fn get_file_description(path: &str) -> Option<String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
-    extern "system" {
-        pub fn GetFileVersionInfoSizeW(filename: *const u16, dummy: *mut u32) -> u32;
-        pub fn GetFileVersionInfoW(filename: *const u16, handle: u32, size: u32, data: *mut core::ffi::c_void) -> windows::Win32::Foundation::BOOL;
-        pub fn VerQueryValueW(block: *const core::ffi::c_void, subblock: *const u16, buffer: *mut *mut core::ffi::c_void, size: *mut u32) -> windows::Win32::Foundation::BOOL;
-    }
-
-    let path_wide: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
-
-    unsafe {
-        let size = GetFileVersionInfoSizeW(path_wide.as_ptr(), std::ptr::null_mut());
-        if size == 0 { return None; }
-
-        let mut buffer = vec![0u8; size as usize];
-        if !GetFileVersionInfoW(path_wide.as_ptr(), 0, size, buffer.as_mut_ptr() as *mut _).as_bool() {
-            return None;
-        }
-
-        // 先查 Translation 获取实际语言码
-        let mut lang_ptr: *mut u8 = std::ptr::null_mut();
-        let mut lang_len: u32 = 0;
-        let trans_query: Vec<u16> = OsStr::new("\\VarFileInfo\\Translation").encode_wide().chain(std::iter::once(0)).collect();
-
-        let mut queries_to_try: Vec<String> = Vec::new();
-
-        if VerQueryValueW(buffer.as_ptr() as *const _, trans_query.as_ptr(), &mut lang_ptr as *mut *mut _ as *mut *mut _, &mut lang_len).as_bool()
-            && !lang_ptr.is_null() && lang_len >= 4
-        {
-            let lang_data = std::slice::from_raw_parts(lang_ptr as *const u16, lang_len as usize / 2);
-            let lang = lang_data[0];
-            let codepage = lang_data[1];
-            queries_to_try.push(format!("\\StringFileInfo\\{:04X}{:04X}\\FileDescription", lang, codepage));
-        }
-        queries_to_try.push("\\StringFileInfo\\080404B0\\FileDescription".to_string());
-        queries_to_try.push("\\StringFileInfo\\040904B0\\FileDescription".to_string());
-        queries_to_try.push("\\StringFileInfo\\040904E4\\FileDescription".to_string());
-        queries_to_try.push("\\StringFileInfo\\040404B0\\FileDescription".to_string());
-
-        for query in &queries_to_try {
-            let query_wide: Vec<u16> = OsStr::new(query).encode_wide().chain(std::iter::once(0)).collect();
-            let mut value_ptr: *mut u16 = std::ptr::null_mut();
-            let mut value_len: u32 = 0;
-
-            if VerQueryValueW(buffer.as_ptr() as *const _, query_wide.as_ptr(), &mut value_ptr as *mut *mut _ as *mut *mut _, &mut value_len).as_bool()
-                && !value_ptr.is_null() && value_len > 1
-            {
-                let name = String::from_utf16_lossy(std::slice::from_raw_parts(value_ptr, (value_len - 1) as usize));
-                if !name.is_empty() {
-                    return Some(name);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// 从注册表查询应用显示名
-#[cfg(windows)]
-fn get_app_display_name_from_registry(exe_name: &str) -> Option<String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
-    extern "system" {
-        pub fn RegOpenKeyExW(
-            hkey: isize,
-            subkey: *const u16,
-            reserved: u32,
-            sam: u32,
-            phkresult: *mut isize,
-        ) -> i32;
-        pub fn RegQueryValueExW(
-            hkey: isize,
-            valuename: *const u16,
-            reserved: *mut u32,
-            pdwtype: *mut u32,
-            pbdata: *mut u8,
-            pcbdata: *mut u32,
-        ) -> i32;
-        pub fn RegCloseKey(hkey: isize) -> i32;
-    }
-
-    const HKEY_LOCAL_MACHINE: isize = 0x80000002;
-    const KEY_READ: u32 = 0x20019;
-    const REG_SZ: u32 = 1;
-
-    // 尝试 App Paths 和 Uninstall 两个位置
-    let registry_paths = [
-        format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{}.exe", exe_name),
-        format!("SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", exe_name),
-        format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", exe_name),
-    ];
-
-    for reg_path in &registry_paths {
-        let key_wide: Vec<u16> = OsStr::new(reg_path).encode_wide().chain(std::iter::once(0)).collect();
-        let name_wide: Vec<u16> = OsStr::new("DisplayName").encode_wide().chain(std::iter::once(0)).collect();
-
-        unsafe {
-            let mut hkey: isize = 0;
-            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, key_wide.as_ptr(), 0, KEY_READ, &mut hkey) == 0 {
-                let mut buf = [0u16; 256];
-                let mut buf_len = (buf.len() * 2) as u32;
-                let mut reg_type: u32 = 0;
-                if RegQueryValueExW(hkey, name_wide.as_ptr(), std::ptr::null_mut(), &mut reg_type, buf.as_mut_ptr() as *mut u8, &mut buf_len) == 0
-                    && reg_type == REG_SZ
-                {
-                    let len = (buf_len / 2) as usize;
-                    let name = String::from_utf16_lossy(&buf[..len]);
-                    let _ = RegCloseKey(hkey);
-                    if !name.is_empty() {
-                        return Some(name);
+    // 1. 先写入上次遗留的 pending 数据
+    if !pending.is_empty() {
+        if let Ok(available) = client.get_available_space_in_frames() {
+            if available > 0 {
+                let write_frames = (pending_frames as u32).min(available) as usize;
+                let write_bytes = write_frames * bytes_per_frame;
+                if write_bytes <= pending.len() {
+                    if let Err(e) = render.write_to_device(write_frames, &pending[..write_bytes], None) {
+                        log::warn!("Output pending write error: {:?}", e);
+                    } else {
+                        pending.drain(..write_bytes);
                     }
                 }
-                let _ = RegCloseKey(hkey);
             }
         }
     }
 
-    None
-}
-
-/// 从 exe 文件的版本信息中读取 ProductName
-#[cfg(windows)]
-fn get_product_name_from_path(path: &str) -> Option<String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
-    extern "system" {
-        pub fn GetFileVersionInfoSizeW(
-            filename: *const u16,
-            dummy: *mut u32,
-        ) -> u32;
-        pub fn GetFileVersionInfoW(
-            filename: *const u16,
-            handle: u32,
-            size: u32,
-            data: *mut core::ffi::c_void,
-        ) -> windows::Win32::Foundation::BOOL;
-        pub fn VerQueryValueW(
-            block: *const core::ffi::c_void,
-            subblock: *const u16,
-            buffer: *mut *mut core::ffi::c_void,
-            size: *mut u32,
-        ) -> windows::Win32::Foundation::BOOL;
-    }
-
-    let path_wide: Vec<u16> = OsStr::new(path)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    unsafe {
-        let size = GetFileVersionInfoSizeW(path_wide.as_ptr(), std::ptr::null_mut());
-        if size == 0 {
-            return None;
+    // 2. 时钟漂移补偿：当 pending 水位过高时跳过当前帧
+    let current_pending = pending.len() / bytes_per_frame;
+    if current_pending > target_pending * 3 {
+        if frame_count % 2400 == 0 {
+            debug_log(&format!("DRIFT SKIP: pending={} frames, skipping output", current_pending));
         }
-
-        let mut buffer = vec![0u8; size as usize];
-        if !GetFileVersionInfoW(path_wide.as_ptr(), 0, size, buffer.as_mut_ptr() as *mut _).as_bool() {
-            return None;
-        }
-
-        // 先查询 VarFileInfo\Translation 获取实际语言码和代码页
-        let mut lang_ptr: *mut u8 = std::ptr::null_mut();
-        let mut lang_len: u32 = 0;
-        let trans_query: Vec<u16> = OsStr::new("\\VarFileInfo\\Translation")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut queries_to_try: Vec<String> = Vec::new();
-
-        if VerQueryValueW(
-            buffer.as_ptr() as *const _,
-            trans_query.as_ptr(),
-            &mut lang_ptr as *mut *mut _ as *mut *mut _,
-            &mut lang_len,
-        ).as_bool() && !lang_ptr.is_null() && lang_len >= 4
-        {
-            // Translation 是 LANG + CODEPAGE 的数组，每个 4 字节
-            let lang_data = std::slice::from_raw_parts(lang_ptr as *const u16, lang_len as usize / 2);
-            let lang = lang_data[0];
-            let codepage = lang_data[1];
-            // 用实际语言码构造查询
-            let query = format!("\\StringFileInfo\\{:04X}{:04X}\\ProductName", lang, codepage);
-            queries_to_try.push(query);
-        }
-
-        // fallback：常见语言码
-        queries_to_try.push("\\StringFileInfo\\080404B0\\ProductName".to_string());
-        queries_to_try.push("\\StringFileInfo\\040904B0\\ProductName".to_string());
-        queries_to_try.push("\\StringFileInfo\\040904E4\\ProductName".to_string());
-        queries_to_try.push("\\StringFileInfo\\040404B0\\ProductName".to_string());
-
-        for query in &queries_to_try {
-            let query_wide: Vec<u16> = OsStr::new(query)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-            let mut value_ptr: *mut u16 = std::ptr::null_mut();
-            let mut value_len: u32 = 0;
-
-            if VerQueryValueW(
-                buffer.as_ptr() as *const _,
-                query_wide.as_ptr(),
-                &mut value_ptr as *mut *mut _ as *mut *mut _,
-                &mut value_len,
-            ).as_bool() && !value_ptr.is_null() && value_len > 1
-            {
-                let name = String::from_utf16_lossy(std::slice::from_raw_parts(
-                    value_ptr,
-                    (value_len - 1) as usize,
-                ));
-                if !name.is_empty() {
-                    return Some(name);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(not(windows))]
-fn list_audio_processes() -> Result<Vec<(String, String, u32)>, String> {
-    Ok(vec![])
-}
-
-/// BGM 按进程捕获线程：使用 WASAPI Process Loopback API
-fn bgm_process_loop(
-    running: Arc<AtomicBool>,
-    sender: Sender<Vec<i16>>,
-    pid: u32,
-) -> Result<(), String> {
-    debug_log(&format!("bgm_loop[{}]: initializing MTA", pid));
-    let _ = initialize_mta().ok();
-
-    debug_log(&format!("bgm_loop[{}]: creating loopback client", pid));
-    let mut client = AudioClient::new_application_loopback_client(pid, true)
-        .map_err(|e| format!("Failed to create process loopback client: {}", e))?;
-    if !running.load(Ordering::Acquire) {
-        return Ok(()); // 被要求停止，释放 WASAPI 资源
-    }
-
-    // 进程 loopback 不支持 get_mixformat()，使用固定格式：32-bit float, 48kHz, 立体声
-    let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
-
-    let channels = 2;
-    let bytes_per_sample = 4;
-    let bytes_per_frame = channels * bytes_per_sample;
-    let is_float = true;
-
-    log::info!(
-        "BGM process loopback: pid={}, 2ch, 32bit, 48kHz, float=true",
-        pid
-    );
-
-    // 进程 loopback 不支持 get_periods()，用 0 让 WASAPI 用默认值
-    debug_log(&format!("bgm_loop[{}]: initializing client", pid));
-    client
-        .initialize_client(&format, 0, &Direction::Capture, &ShareMode::Shared, true)
-        .map_err(|e| format!("Failed to initialize BGM client: {}", e))?;
-    if !running.load(Ordering::Acquire) {
-        return Ok(());
-    }
-
-    debug_log(&format!("bgm_loop[{}]: setting event handle", pid));
-    let event_handle = client
-        .set_get_eventhandle()
-        .map_err(|e| format!("Failed to set BGM event handle: {}", e))?;
-
-    debug_log(&format!("bgm_loop[{}]: getting capture client", pid));
-    let capture = client
-        .get_audiocaptureclient()
-        .map_err(|e| format!("Failed to get BGM capture client: {}", e))?;
-    if !running.load(Ordering::Acquire) {
-        return Ok(());
-    }
-
-    debug_log(&format!("bgm_loop[{}]: starting stream", pid));
-    client
-        .start_stream()
-        .map_err(|e| format!("Failed to start BGM stream: {}", e))?;
-
-    let frame_size = 480;
-    let mut buffer = vec![0u8; frame_size * bytes_per_frame];
-
-    log::info!("BGM process loopback started for pid={}", pid);
-    debug_log(&format!("bgm_loop[{}]: stream started, entering main loop", pid));
-
-    let mut frame_count: u64 = 0;
-    let mut consecutive_errors: u32 = 0;
-
-    while running.load(Ordering::Acquire) {
-        if event_handle.wait_for_event(100).is_err() {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
-        }
-
-        match capture.read_from_device(&mut buffer) {
-            Ok((frames_read, _flags)) => {
-                consecutive_errors = 0; // 重置错误计数
-                if frames_read == 0 {
-                    continue;
-                }
-
-                let bytes_read = frames_read as usize * bytes_per_frame;
-
-                let samples: Vec<i16> = if is_float && bytes_per_sample == 4 {
-                    buffer[..bytes_read]
-                        .chunks_exact(4)
-                        .map(|chunk| {
-                            let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                            (val.clamp(-1.0, 1.0) * 32767.0) as i16
-                        })
-                        .collect()
-                } else if bytes_per_sample == 4 {
-                    buffer[..bytes_read]
-                        .chunks_exact(4)
-                        .map(|chunk| {
-                            let val = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                            (val >> 16) as i16
-                        })
-                        .collect()
-                } else if bytes_per_sample == 2 {
-                    buffer[..bytes_read]
-                        .chunks_exact(2)
-                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                        .collect()
-                } else {
-                    vec![0; frames_read as usize]
-                };
-
-                let stereo_samples: Vec<i16> = if channels == 1 {
-                    samples
-                } else {
-                    samples
-                        .chunks(channels)
-                        .flat_map(|frame| {
-                            let l = frame.first().copied().unwrap_or(0);
-                            let r = frame.get(1).copied().unwrap_or(l);
-                            vec![l, r]
-                        })
-                        .collect()
-                };
-
-                frame_count += 1;
-                if frame_count % 100 == 1 {
-                    let peak = stereo_samples.iter().map(|s| s.abs()).fold(0i16, i16::max);
-                    debug_log(&format!("bgm_loop[{}]: frame {} ok, {} samples, peak={}", pid, frame_count, stereo_samples.len(), peak));
-                }
-
-                // 非阻塞发送，channel 满时短暂等待并检查退出标志
-                let send_len = stereo_samples.len();
-                let mut samples_to_send = Some(stereo_samples);
-                while let Some(samples) = samples_to_send.take() {
-                    match sender.try_send(samples) {
-                        Ok(_) => {
-                            if frame_count % 100 == 1 {
-                                debug_log(&format!("bgm_loop[{}]: sent {} samples to channel", pid, send_len));
-                            }
-                            break;
-                        }
-                        Err(crossbeam_channel::TrySendError::Full(samples)) => {
-                            if !running.load(Ordering::Acquire) {
-                                break;
-                            }
-                            samples_to_send = Some(samples);
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+    } else {
+        // 3. 写入当前帧数据
+        match client.get_available_space_in_frames() {
+            Ok(available) if available > 0 => {
+                let write_frames = (out_frames as u32).min(available) as usize;
+                let write_bytes = write_frames * bytes_per_frame;
+                if write_bytes <= data.len() {
+                    if let Err(e) = render.write_to_device(write_frames, &data[..write_bytes], None) {
+                        log::warn!("Output write error: {:?}", e);
                     }
+                    if write_bytes < data.len() {
+                        pending.extend_from_slice(&data[write_bytes..data.len()]);
+                    }
+                }
+            }
+            Ok(_available) => {
+                let max_pending = target_pending * 5;
+                if current_pending < max_pending {
+                    pending.extend_from_slice(data);
                 }
             }
             Err(e) => {
-                consecutive_errors += 1;
-                log::warn!("Failed to read BGM: {} (consecutive: {})", e, consecutive_errors);
-                if consecutive_errors >= 10 {
-                    log::warn!("BGM target process likely exited, stopping loopback for pid={}", pid);
-                    debug_log(&format!("bgm_loop[{}]: exiting after {} consecutive errors", pid, consecutive_errors));
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
+                log::warn!("get_available_space_in_frames error: {:?}", e);
             }
         }
     }
+}
 
-    client.stop_stream().ok();
-    log::info!("BGM process loopback stopped");
+// ====== 处理链各阶段峰值 ======
+struct PeakDiagnostics {
+    pre_gain: f32,
+    post_gain: f32,
+    post_eq: f32,
+    post_bgm: f32,
+    output: f32,
+}
 
-    Ok(())
+// ====== 诊断日志：每秒摘要 + 异常告警 ======
+fn log_diagnostics(
+    frame_count: u64,
+    input_frame: &[f32; 480],
+    peaks: &PeakDiagnostics,
+    mic_gain: f32,
+    eq_enabled: bool,
+    bgm_active: bool,
+    output_client: &AudioClient,
+    output_bytes_per_frame: usize,
+    pending_len: usize,
+    target_pending: usize,
+    out_frames: usize,
+) {
+    // 每 5 秒记录输出缓冲区状态
+    if frame_count % 2400 == 0 {
+        if let Ok(available) = output_client.get_available_space_in_frames() {
+            let drift_status = if pending_len / output_bytes_per_frame > target_pending * 3 { "SKIP" } else { "ok" };
+            debug_log(&format!("OUT_BUF frame={} available={} pending={} out_frames={} drift={}", frame_count, available, pending_len / output_bytes_per_frame, out_frames, drift_status));
+        }
+    }
+
+    // 每秒完整信号链摘要
+    if frame_count % 480 == 0 {
+        debug_log(&format!(
+            "DIAG frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
+            frame_count,
+            input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max),
+            peaks.pre_gain, peaks.post_gain, peaks.post_eq, peaks.post_bgm, peaks.output,
+            mic_gain, eq_enabled, bgm_active
+        ));
+    }
+
+    // 异常告警
+    let alarm = peaks.post_gain > 24000.0 || peaks.post_eq > 24000.0
+        || peaks.post_bgm > 24000.0 || peaks.output > 24000.0;
+    if alarm {
+        debug_log(&format!(
+            "ALARM frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
+            frame_count,
+            input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max),
+            peaks.pre_gain, peaks.post_gain, peaks.post_eq, peaks.post_bgm, peaks.output,
+            mic_gain, eq_enabled, bgm_active
+        ));
+    }
 }
 
 /// 主音频循环：麦克风采集 → 降噪 → EQ → 混音（可选 BGM）→ 输出
@@ -1355,6 +916,9 @@ fn audio_loop(
     let max_output_ratio = (output_sample_rate as f64 / 48000.0).ceil() as usize;
     let max_output_frames = frame_size * max_output_ratio;
     let mut output_buffer = vec![0u8; max_output_frames * output_bytes_per_frame];
+    let mut output_pending: Vec<u8> = Vec::new();
+    // 时钟漂移补偿：根据 pending 水位动态跳过输出帧，维持缓冲区稳定
+    let target_pending_frames = frame_size; // 目标水位：1 帧 (10ms)
     let mut frame_count: u64 = 0;
 
     // 输入累积缓冲：非 48kHz 设备需要重采样，这里累积 mono f32 样本
@@ -1401,26 +965,12 @@ fn audio_loop(
                     debug_log(&format!("Loop iter {}: frames_read={}, has_signal={}", loop_iteration, frames_read, has_signal));
                 }
 
-                // 1. 原始字节 → f32 样本（根据设备实际格式）
                 let bytes_read = frames_read as usize * input_bytes_per_frame;
-                let raw_samples = bytes_to_f32_samples(
+                let resampled = process_input(
                     &input_buffer[..bytes_read],
-                    input_bits,
-                    &input_sample_type,
-                    input_channels,
+                    input_bits, &input_sample_type,
+                    input_channels, input_sample_rate,
                 );
-
-                // 2. 多声道 → 单声道
-                let mono_samples = downmix_to_mono(&raw_samples, input_channels);
-
-                // 3. 重采样到 48kHz（如果设备采样率不是 48kHz）
-                let resampled = if input_sample_rate != 48000 {
-                    resample_linear(&mono_samples, input_sample_rate, 48000)
-                } else {
-                    mono_samples
-                };
-
-                // 4. 累积到输入缓冲
                 input_acc.extend_from_slice(&resampled);
 
                 // 5. 每攒够 frame_size (480) 个样本就处理一帧
@@ -1708,114 +1258,36 @@ fn audio_loop(
                         write_to_monitor(&limited_samples, &monitor_render_opt, &monitor_event_opt, &mut monitor_buffer, monitor_sample_rate);
                     }
 
-                    // 6. 重采样回设备采样率
+                    // 6. 重采样回设备采样率 + 7. 单声道→多声道 + 8. f32→字节
                     let resampled_out = if output_sample_rate != 48000 {
                         resample_linear(&limited_samples, 48000, output_sample_rate)
                     } else {
                         limited_samples.clone()
                     };
+                    let out_bytes = format_output_bytes(
+                        &resampled_out, &mut output_buffer,
+                        output_channels, output_bytes_per_frame,
+                        output_bits, &output_sample_type,
+                    );
+                    let out_frames = out_bytes / output_bytes_per_frame;
 
-                    // 7. 单声道 → 多声道
-                    let stereo_out = upmix_to_stereo(&resampled_out, output_channels);
-
-                    // 8. f32 → 输出设备格式字节
-                    let out_frames = stereo_out.len() / output_channels;
-                    let out_bytes = out_frames * output_bytes_per_frame;
-                    output_buffer[..out_bytes].fill(0);
-                    for (i, &sample) in stereo_out.iter().enumerate() {
-                        let byte_pos = i * (output_bytes_per_frame / output_channels);
-                        match (output_bits, &output_sample_type) {
-                            (8, SampleType::Int) => {
-                                // unsigned 8-bit: -32768~32767 → 0~255
-                                let val = ((sample / 128.0) + 128.0).clamp(0.0, 255.0) as u8;
-                                if byte_pos < output_buffer.len() {
-                                    output_buffer[byte_pos] = val;
-                                }
-                            }
-                            (16, SampleType::Int) => {
-                                let val = (sample.clamp(-32768.0, 32767.0)) as i16;
-                                let bytes = val.to_le_bytes();
-                                if byte_pos + 1 < output_buffer.len() {
-                                    output_buffer[byte_pos] = bytes[0];
-                                    output_buffer[byte_pos + 1] = bytes[1];
-                                }
-                            }
-                            (24, SampleType::Int) => {
-                                // 24-bit: 映射到 i32 范围，取高 24 位
-                                let val = (sample * 256.0).clamp(-8388608.0, 8388607.0) as i32;
-                                if byte_pos + 2 < output_buffer.len() {
-                                    output_buffer[byte_pos] = (val & 0xFF) as u8;
-                                    output_buffer[byte_pos + 1] = ((val >> 8) & 0xFF) as u8;
-                                    output_buffer[byte_pos + 2] = ((val >> 16) & 0xFF) as u8;
-                                }
-                            }
-                            (32, SampleType::Int) => {
-                                let val = (sample * 65536.0).clamp(-2147483648.0, 2147483647.0) as i32;
-                                let bytes = val.to_le_bytes();
-                                if byte_pos + 3 < output_buffer.len() {
-                                    output_buffer[byte_pos] = bytes[0];
-                                    output_buffer[byte_pos + 1] = bytes[1];
-                                    output_buffer[byte_pos + 2] = bytes[2];
-                                    output_buffer[byte_pos + 3] = bytes[3];
-                                }
-                            }
-                            (32, SampleType::Float) => {
-                                let val = (sample / 32767.0).clamp(-1.0, 1.0);
-                                let bytes = val.to_le_bytes();
-                                if byte_pos + 3 < output_buffer.len() {
-                                    output_buffer[byte_pos] = bytes[0];
-                                    output_buffer[byte_pos + 1] = bytes[1];
-                                    output_buffer[byte_pos + 2] = bytes[2];
-                                    output_buffer[byte_pos + 3] = bytes[3];
-                                }
-                            }
-                            (64, SampleType::Float) => {
-                                let val = (sample as f64 / 32767.0).clamp(-1.0, 1.0);
-                                let bytes = val.to_le_bytes();
-                                if byte_pos + 7 < output_buffer.len() {
-                                    for (j, &b) in bytes.iter().enumerate() {
-                                        output_buffer[byte_pos + j] = b;
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Fallback to 16bit
-                                let val = (sample.clamp(-32768.0, 32767.0)) as i16;
-                                let bytes = val.to_le_bytes();
-                                if byte_pos + 1 < output_buffer.len() {
-                                    output_buffer[byte_pos] = bytes[0];
-                                    output_buffer[byte_pos + 1] = bytes[1];
-                                }
-                            }
-                        }
-                    }
-
-                    // 始终写入输出设备，让 WASAPI 处理缓冲区背压
-                    // 写入失败时仅记录警告，不跳过帧（跳过会导致可听到的卡顿）
-                    if out_bytes <= output_buffer.len() {
-                        if let Err(e) = output_render.write_to_device(
-                            out_frames,
-                            &output_buffer[..out_bytes],
-                            None,
-                        ) {
-                            log::warn!("Output write error: {:?}", e);
-                        }
-                    }
+                    // ====== 输出写入：时钟漂移补偿 ======
+                    write_output_with_drift(
+                        &output_render, &output_client,
+                        &output_buffer[..out_bytes], out_frames,
+                        &mut output_pending, output_bytes_per_frame,
+                        target_pending_frames, frame_count,
+                    );
 
                     frame_count += 1;
 
-                    // ====== 诊断日志：每秒摘要 + 异常告警 ======
-                    // 每 480 帧（1秒）输出完整信号链摘要
-                    if frame_count % 480 == 0 {
-                        let input_peak = input_frame.iter()
-                            .map(|s| s.abs()).fold(0.0f32, f32::max);
-                        debug_log(&format!(
-                            "DIAG frame={} | in={:.0} preG={:.0} postG={:.0} postEQ={:.0} postBGM={:.0} out={:.0} | gain={:.1} eq={} bgm={}",
-                            frame_count, input_peak, pre_gain_peak, post_gain_peak,
-                            post_eq_peak, post_bgm_peak, output_peak,
-                            mic_gain, current_eq.enabled, bgm_running.load(Ordering::Acquire)
-                        ));
-                    }
+                    // ====== 诊断日志 ======
+                    log_diagnostics(
+                        frame_count, &input_frame,
+                        &PeakDiagnostics { pre_gain: pre_gain_peak, post_gain: post_gain_peak, post_eq: post_eq_peak, post_bgm: post_bgm_peak, output: output_peak },
+                        mic_gain, current_eq.enabled, bgm_running.load(Ordering::Acquire),
+                        &output_client, output_bytes_per_frame, output_pending.len(), target_pending_frames, out_frames,
+                    );
 
                     // ====== 监听设备变更检测：每秒检查系统默认输出是否改变 ======
                     if frame_count % 480 == 0 {
@@ -1915,187 +1387,4 @@ fn audio_loop(
     }
 
     Ok(())
-}
-
-fn find_device(name: Option<&str>, input: bool) -> Result<Device, String> {
-    let direction = if input {
-        Direction::Capture
-    } else {
-        Direction::Render
-    };
-    let collection = DeviceCollection::new(&direction)
-        .map_err(|e| format!("Failed to get device collection: {}", e))?;
-
-    if let Some(target_name) = name {
-        collection
-            .get_device_with_name(target_name)
-            .map_err(|e| format!("Device '{}' not found: {}", target_name, e))
-    } else {
-        get_default_device(&direction).map_err(|e| format!("Failed to get default device: {}", e))
-    }
-}
-
-fn calculate_rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = samples.iter().map(|&s| s * s).sum();
-    (sum / samples.len() as f32).sqrt()
-}
-
-fn compute_spectrum(samples: &[f32], bands: usize) -> Vec<f32> {
-    let n = samples.len();
-    if n == 0 {
-        return vec![0.0; bands];
-    }
-
-    let mut spectrum = vec![0.0f32; bands];
-    let band_size = n / bands;
-
-    for i in 0..bands {
-        let start = i * band_size;
-        let end = (start + band_size).min(n);
-        if start >= n {
-            break;
-        }
-        let band_samples = &samples[start..end];
-        let rms = calculate_rms(band_samples);
-        spectrum[i] = rms / 32768.0;
-    }
-
-    for val in spectrum.iter_mut() {
-        if *val > 0.001 {
-            *val = (val.log10() + 3.0) / 3.0;
-        }
-        *val = val.clamp(0.0, 1.0);
-    }
-
-    spectrum
-}
-
-/// 将 f32 样本写入监听设备
-fn write_to_monitor(
-    samples: &[f32],
-    render_opt: &Option<AudioRenderClient>,
-    event_opt: &Option<wasapi::Handle>,
-    buffer: &mut [u8],
-    monitor_sample_rate: u32,
-) {
-    let render = match render_opt {
-        Some(r) => r,
-        None => return,
-    };
-    let ready = match event_opt {
-        Some(evt) => evt.wait_for_event(10).is_ok(),
-        None => true,
-    };
-    if !ready {
-        return;
-    }
-    // 重采样到监听设备采样率
-    let resampled = if monitor_sample_rate != 48000 {
-        resample_linear(samples, 48000, monitor_sample_rate)
-    } else {
-        samples.to_vec()
-    };
-    let stereo = upmix_to_stereo(&resampled, 2);
-    for (i, &sample) in stereo.iter().enumerate() {
-        let val = (sample.clamp(-32768.0, 32767.0)) as i16;
-        let bytes = val.to_le_bytes();
-        if i * 2 + 1 < buffer.len() {
-            buffer[i * 2] = bytes[0];
-            buffer[i * 2 + 1] = bytes[1];
-        }
-    }
-    let frames = resampled.len();
-    let _ = render.write_to_device(frames, &buffer[..frames * 4], None);
-}
-
-/// 线性插值重采样：将音频从 from_rate 重采样到 to_rate
-fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate || input.is_empty() {
-        return input.to_vec();
-    }
-    let ratio = from_rate as f64 / to_rate as f64;
-    let output_len = (input.len() as f64 / ratio) as usize;
-    let mut output = Vec::with_capacity(output_len);
-    for i in 0..output_len {
-        let src_pos = i as f64 * ratio;
-        let src_idx = src_pos as usize;
-        let frac = src_pos - src_idx as f64;
-        let sample = if src_idx + 1 < input.len() {
-            input[src_idx] * (1.0 - frac as f32) + input[src_idx + 1] * frac as f32
-        } else {
-            input[src_idx]
-        };
-        output.push(sample);
-    }
-    output
-}
-
-/// 将原始字节样本（i16 或 f32）转换为 f32 归一化值
-fn bytes_to_f32_samples(buf: &[u8], bits: u16, sample_type: &SampleType, _channels: usize) -> Vec<f32> {
-    match (bits, sample_type) {
-        (8, SampleType::Int) => buf
-            .iter()
-            .map(|&b| (b as i16 - 128) as f32 * 128.0) // unsigned 8-bit: 0-255 → -128~127, 然后放大到 i16 范围
-            .collect(),
-        (16, SampleType::Int) => buf
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
-            .collect(),
-        (24, SampleType::Int) => buf
-            .chunks_exact(3)
-            .map(|c| {
-                // 24-bit little-endian: [low, mid, high]，符号扩展到 i32
-                let val = (c[0] as i32) | ((c[1] as i32) << 8) | ((c[2] as i32) << 16);
-                // 符号扩展：如果 bit 23 为 1，高 8 位填 1
-                let val = if val & 0x800000 != 0 { val | 0xFF000000u32 as i32 } else { val };
-                (val >> 8) as f32 // 右移 8 位，相当于除以 256，映射到 i16 范围
-            })
-            .collect(),
-        (32, SampleType::Int) => buf
-            .chunks_exact(4)
-            .map(|c| {
-                let val = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                (val >> 16) as f32
-            })
-            .collect(),
-        (32, SampleType::Float) => buf
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * 32767.0)
-            .collect(),
-        (64, SampleType::Float) => buf
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32 * 32767.0)
-            .collect(),
-        _ => {
-            log::warn!("Unsupported audio format: {}bit {:?}, falling back to 16bit", bits, sample_type);
-            buf.chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
-                .collect()
-        }
-    }
-}
-
-/// 多声道转单声道（取平均）
-fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-    samples
-        .chunks(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-/// 单声道转多声道（复制到每个声道）
-fn upmix_to_stereo(samples: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-    samples
-        .iter()
-        .flat_map(|&s| vec![s; channels])
-        .collect()
 }

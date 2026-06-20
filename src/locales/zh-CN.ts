@@ -39,7 +39,7 @@ export default {
     monitorPoint: '监听点',
     monitorPoints: {
       off: '关闭',
-      raw: '原始输入',
+      raw: '降噪前',
       denoised: '降噪后',
       gain: '增益后',
       eq: 'EQ后',

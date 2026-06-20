@@ -1,5 +1,9 @@
 mod audio_engine;
+mod audio_utils;
+mod bgm;
+mod debug;
 mod denoise;
+mod device;
 mod device_watcher;
 mod eq;
 
