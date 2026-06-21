@@ -462,9 +462,8 @@ struct OutputResources {
 }
 unsafe impl Send for OutputResources {}
 
-/// 输出线程：标准 WASAPI event-driven 模式 + 读游标
-/// wait_for_event → get_current_padding → 写入 → 游标前进
-/// 每帧 drain 移动大量字节会丢帧，改用读游标 + 低频 compact
+/// 输出线程：标准 WASAPI event-driven + 读游标
+/// 热路径：只推进 read_pos，不移动内存。缓冲区完全消费时才 clear reset。
 fn output_thread(
     running: Arc<AtomicBool>,
     receiver: Receiver<Vec<u8>>,
@@ -509,7 +508,7 @@ fn output_thread(
         let valid_len = output_buf.len() - read_pos;
 
         if available == 0 || valid_len == 0 {
-            // 空缓冲区时 compact 释放内存
+            // 全部消费完 → reset
             if read_pos > 0 && read_pos == output_buf.len() {
                 output_buf.clear();
                 read_pos = 0;
@@ -525,6 +524,11 @@ fn output_thread(
                 Ok(()) => {
                     write_ok_count += 1;
                     read_pos += write_bytes;
+                    // 全部消费完 → reset
+                    if read_pos == output_buf.len() {
+                        output_buf.clear();
+                        read_pos = 0;
+                    }
                 }
                 Err(e) => {
                     write_err_count += 1;
@@ -533,13 +537,7 @@ fn output_thread(
             }
         }
 
-        // 5. 低频 compact：已消费部分超过 1 帧时才整理
-        if read_pos >= frame_bytes {
-            output_buf.drain(..read_pos);
-            read_pos = 0;
-        }
-
-        // 6. 溢出保护：buffer 超过 20 帧时丢弃旧数据
+        // 5. 溢出保护：缓冲区过大时丢弃旧数据
         let max_buf = frame_bytes * 20;
         if output_buf.len() > max_buf {
             let drain = output_buf.len() - max_buf;
@@ -548,7 +546,7 @@ fn output_thread(
             debug_log(&format!("output_thread: dropped {} bytes (overflow), buf={}bytes", drain, output_buf.len()));
         }
 
-        // 7. 每 5 秒输出一次统计
+        // 6. 每 5 秒输出一次统计
         if stats_start.elapsed().as_secs() >= 5 {
             let pending = (output_buf.len() - read_pos) / output_bytes_per_frame;
             debug_log(&format!(
@@ -560,7 +558,7 @@ fn output_thread(
             stats_start = std::time::Instant::now();
         }
 
-        // 8. BGM 漂移补偿
+        // 7. BGM 漂移补偿
         let pending_frames = (output_buf.len() - read_pos) / output_bytes_per_frame;
         let skip = if pending_frames > frame_size * 2 {
             0.05
