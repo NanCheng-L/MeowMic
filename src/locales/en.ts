@@ -101,6 +101,15 @@ export default {
     start: 'Mic Blast',
     stop: 'Stop Blast',
     intensity: 'Blast Intensity',
+    effects: {
+      classic: 'Classic Blast',
+      electric: 'Electric',
+      clipping: 'Clipping',
+      whiteNoise: 'White Noise',
+      robot: 'Robot',
+      demon: 'Demon',
+      echo: 'Echo',
+    },
   },
   status: {
     running: 'Running',

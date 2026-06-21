@@ -20,7 +20,7 @@
         :class="{ active: selectedEffect === effect.value }"
         @click="selectEffect(effect.value)"
       >
-        {{ effect.icon }} {{ effect.label }}
+        {{ effect.icon }} {{ t(`explode.effects.${effect.key}`) }}
       </button>
     </div>
 
@@ -64,12 +64,13 @@ const emit = defineEmits<{
 const selectedEffect = ref(0)
 
 const effects = [
-  { value: 0, icon: '🔊', label: '经典爆音' },
-  { value: 1, icon: '⚡', label: '电流声' },
-  { value: 2, icon: '💥', label: '破音' },
-  { value: 3, icon: '📻', label: '白噪音' },
-  { value: 4, icon: '🤖', label: '机器人' },
-  { value: 5, icon: '👿', label: '恶魔' },
+  { value: 0, icon: '🔊', key: 'classic' },
+  { value: 1, icon: '⚡', key: 'electric' },
+  { value: 2, icon: '💥', key: 'clipping' },
+  { value: 3, icon: '📻', key: 'whiteNoise' },
+  { value: 4, icon: '🤖', key: 'robot' },
+  { value: 5, icon: '👿', key: 'demon' },
+  { value: 6, icon: '🌀', key: 'echo' },
 ]
 
 const EFFECT_KEY = 'meowmic-explode-effect'

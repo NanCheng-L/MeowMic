@@ -7,7 +7,7 @@ use crate::audio_utils::{calculate_rms, compute_spectrum, resample_in_place, wri
 use crate::debug::debug_log;
 use crate::denoise::{self, FRAME_SIZE};
 use crate::eq::{EqConfig, EqProcessor};
-use crate::explode::{ExplodeState, process_explode_into};
+use crate::explode::{ExplodeState, ExplodeAudioState, process_explode_into};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use wasapi::SampleType;
@@ -32,6 +32,15 @@ pub struct FrameState {
     pub work_buf_b: Vec<f32>,
     pub resample_buf: Vec<f32>,
     pub monitor_resample_buf: Vec<f32>,
+    /// 爆炸模式音频线程独占状态（无锁）
+    pub explode_audio: ExplodeAudioState,
+    /// input_acc 内部读位置（避免 drain 的 O(n) memmove）
+    pub input_read_pos: usize,
+    /// 模型重建时置 true，audio_loop 清空 input_acc
+    pub clear_input_acc: bool,
+    /// process_input 预分配工作 buffer
+    pub input_work_a: Vec<f32>,
+    pub input_work_b: Vec<f32>,
 }
 
 /// 帧处理共享依赖（只读引用）
@@ -45,7 +54,6 @@ pub struct FrameDeps<'a> {
     pub monitor_point: &'a Arc<AtomicU32>,
     pub explode_enabled: &'a Arc<AtomicBool>,
     pub explode_state: &'a Arc<ExplodeState>,
-    pub output_tx: &'a crossbeam_channel::Sender<Vec<u8>>,
     pub stats: &'a Arc<parking_lot::RwLock<crate::AudioStats>>,
     pub saved_model_states: &'a Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     pub model_name: Option<&'a str>,
@@ -197,13 +205,13 @@ pub fn log_diagnostics(
 }
 
 /// 处理单帧音频：降噪 → strength mixing → 增益 → EQ → 爆炸 → BGM → limiter → 输出
+/// 返回输出字节数（供 audio_loop 发送到输出线程）
 pub fn process_frame(
     chunk: &[f32],
     current_config: &DenoiseConfig,
     state: &mut FrameState,
     deps: &FrameDeps,
-    input_acc: &mut Vec<f32>,
-) {
+) -> usize {
     let frame_start = std::time::Instant::now();
 
     let mut input_frame = [0.0f32; 480];
@@ -252,7 +260,7 @@ pub fn process_frame(
                     state.eq_processor.apply_config(&eq_cfg);
                     state.last_eq_config = Some(eq_cfg);
                 }
-                input_acc.clear();
+                state.clear_input_acc = true;
                 if let Ok(mut states) = deps.saved_model_states.lock() {
                     states.remove(deps.current_model_name);
                 }
@@ -411,6 +419,7 @@ pub fn process_frame(
             &state.work_buf_b[..deps.frame_size],
             &mut state.work_buf_a[..deps.frame_size],
             &deps.explode_state,
+            &mut state.explode_audio,
         );
     } else {
         state.work_buf_a[..deps.frame_size]
@@ -540,17 +549,6 @@ pub fn process_frame(
         deps.output_sample_type,
     );
 
-    // ====== 输出：发送到输出线程 ======
-    if deps
-        .output_tx
-        .try_send(state.output_buffer[..out_bytes].to_vec())
-        .is_err()
-    {
-        if state.frame_count % 2400 == 0 {
-            debug_log("output channel full or closed, dropped frame");
-        }
-    }
-
     state.frame_count += 1;
 
     // 帧处理总耗时
@@ -626,4 +624,6 @@ pub fn process_frame(
         current_stats.frames_processed = state.frame_count;
         current_stats.spectrum = compute_spectrum(&input_frame, 32);
     }
+
+    out_bytes
 }

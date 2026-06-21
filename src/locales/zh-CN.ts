@@ -101,6 +101,15 @@ export default {
     start: '一键炸麦',
     stop: '关闭炸麦',
     intensity: '炸麦强度',
+    effects: {
+      classic: '经典爆音',
+      electric: '电流声',
+      clipping: '破音',
+      whiteNoise: '白噪音',
+      robot: '机器人',
+      demon: '恶魔',
+      echo: '回音',
+    },
   },
   status: {
     running: '运行中',

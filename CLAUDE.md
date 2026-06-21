@@ -167,6 +167,8 @@ scripts/                # 构建/发布辅助脚本
 - **DeepFilterNet reduce_mask**：DLL 的 `reduce_mask` 参数 0=NONE(Independent), 1=MAX, 2=MEAN。GUI 默认用 0，不要传 2
 - **nnnoiseless 输入范围**：RNNoise 期望 i16 范围 [-32768, 32767]，内部静音阈值按此校准。归一化到 [-1, 1] 会导致所有帧被判定为静音直接跳过，完全丧失降噪能力
 - **爆炸模式 dual-flag**：`explode_enabled`（AudioEngine 控制是否调用 `process_explode_into`）和 `explode_state.enabled`（ExplodeState 内部控制是否实际处理）是两个独立 flag。`set_explode_mode()` 必须同时同步两者，否则爆炸效果被跳过但调用链正常执行，表现为"开关打开了但没效果"
+- **音频热路径禁止堆分配**：音频线程 48kHz 每秒处理 50 帧，任何 `Vec::new()` / `.collect()` / `.to_vec()` / `.clone()` 都会在帧间产生堆分配，饿死 WASAPI 回调导致整个音频冻结（频谱也停止）。所有效果函数必须写入预分配的 output buffer（`process_explode_into` 的 `output: &mut [f32]`），`process_input` 必须用 `_into` 版本的工具函数写入预分配 buffer，输出 channel 发送用 buffer 池轮换而非 `.to_vec()`
+- **爆炸模式 echo 效果**：60% 强度 = 最大效果（`mix = (intensity / 60.0).min(1.0)`），延迟 10~80ms，反馈 0~0.4，湿声增益 0~0.8。delay_buf 大小 24000 samples（500ms @ 48kHz），延迟不能超过 buf_len 否则 usize 减法下溢
 
 ## 版本号管理
 

@@ -90,28 +90,6 @@ pub fn write_to_monitor(
     let _ = render.write_to_device(frames, &monitor_buffer[..stereo_bytes], None);
 }
 
-/// 线性插值重采样：将音频从 from_rate 重采样到 to_rate
-pub fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate || input.is_empty() {
-        return input.to_vec();
-    }
-    let ratio = from_rate as f64 / to_rate as f64;
-    let output_len = (input.len() as f64 / ratio) as usize;
-    let mut output = Vec::with_capacity(output_len);
-    for i in 0..output_len {
-        let src_pos = i as f64 * ratio;
-        let src_idx = src_pos as usize;
-        let frac = src_pos - src_idx as f64;
-        let sample = if src_idx + 1 < input.len() {
-            input[src_idx] * (1.0 - frac as f32) + input[src_idx + 1] * frac as f32
-        } else {
-            input[src_idx]
-        };
-        output.push(sample);
-    }
-    output
-}
-
 /// 线性插值重采样（写入预分配的 output buffer，返回实际写入的样本数）
 pub fn resample_in_place(input: &[f32], from_rate: u32, to_rate: u32, output: &mut [f32]) -> usize {
     if from_rate == to_rate || input.is_empty() {
@@ -135,58 +113,77 @@ pub fn resample_in_place(input: &[f32], from_rate: u32, to_rate: u32, output: &m
     output_len
 }
 
-/// 将原始字节样本（i16 或 f32）转换为 f32 归一化值
-pub fn bytes_to_f32_samples(buf: &[u8], bits: u16, sample_type: &SampleType, _channels: usize) -> Vec<f32> {
+/// 将原始字节样本（i16 或 f32）转换为 f32 归一化值（写入预分配 buffer，返回样本数）
+pub fn bytes_to_f32_samples_into(buf: &[u8], bits: u16, sample_type: &SampleType, _channels: usize, output: &mut [f32]) -> usize {
     match (bits, sample_type) {
-        (8, SampleType::Int) => buf
-            .iter()
-            .map(|&b| (b as i16 - 128) as f32 * 128.0) // unsigned 8-bit: 0-255 → -128~127, 然后放大到 i16 范围
-            .collect(),
-        (16, SampleType::Int) => buf
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
-            .collect(),
-        (24, SampleType::Int) => buf
-            .chunks_exact(3)
-            .map(|c| {
-                // 24-bit little-endian: [low, mid, high]，符号扩展到 i32
+        (8, SampleType::Int) => {
+            let len = buf.len().min(output.len());
+            for (i, &b) in buf.iter().take(len).enumerate() {
+                output[i] = (b as i16 - 128) as f32 * 128.0;
+            }
+            len
+        }
+        (16, SampleType::Int) => {
+            let len = (buf.len() / 2).min(output.len());
+            for (i, c) in buf.chunks_exact(2).take(len).enumerate() {
+                output[i] = i16::from_le_bytes([c[0], c[1]]) as f32;
+            }
+            len
+        }
+        (24, SampleType::Int) => {
+            let len = (buf.len() / 3).min(output.len());
+            for (i, c) in buf.chunks_exact(3).take(len).enumerate() {
                 let val = (c[0] as i32) | ((c[1] as i32) << 8) | ((c[2] as i32) << 16);
-                // 符号扩展：如果 bit 23 为 1，高 8 位填 1
                 let val = if val & 0x800000 != 0 { val | 0xFF000000u32 as i32 } else { val };
-                (val >> 8) as f32 // 右移 8 位，相当于除以 256，映射到 i16 范围
-            })
-            .collect(),
-        (32, SampleType::Int) => buf
-            .chunks_exact(4)
-            .map(|c| {
+                output[i] = (val >> 8) as f32;
+            }
+            len
+        }
+        (32, SampleType::Int) => {
+            let len = (buf.len() / 4).min(output.len());
+            for (i, c) in buf.chunks_exact(4).take(len).enumerate() {
                 let val = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                (val >> 16) as f32
-            })
-            .collect(),
-        (32, SampleType::Float) => buf
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * 32767.0)
-            .collect(),
-        (64, SampleType::Float) => buf
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32 * 32767.0)
-            .collect(),
+                output[i] = (val >> 16) as f32;
+            }
+            len
+        }
+        (32, SampleType::Float) => {
+            let len = (buf.len() / 4).min(output.len());
+            for (i, c) in buf.chunks_exact(4).take(len).enumerate() {
+                output[i] = f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * 32767.0;
+            }
+            len
+        }
+        (64, SampleType::Float) => {
+            let len = (buf.len() / 8).min(output.len());
+            for (i, c) in buf.chunks_exact(8).take(len).enumerate() {
+                output[i] = f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32 * 32767.0;
+            }
+            len
+        }
         _ => {
             log::warn!("Unsupported audio format: {}bit {:?}, falling back to 16bit", bits, sample_type);
-            buf.chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
-                .collect()
+            let len = (buf.len() / 2).min(output.len());
+            for (i, c) in buf.chunks_exact(2).take(len).enumerate() {
+                output[i] = i16::from_le_bytes([c[0], c[1]]) as f32;
+            }
+            len
         }
     }
 }
 
-/// 多声道转单声道（取平均）
-pub fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+/// 将原始字节样本（i16 或 f32）转换为 f32 归一化值（写入预分配 buffer，返回样本数）
+pub fn downmix_to_mono_into(samples: &[f32], channels: usize, output: &mut [f32]) -> usize {
     if channels <= 1 {
-        return samples.to_vec();
+        let len = samples.len().min(output.len());
+        output[..len].copy_from_slice(&samples[..len]);
+        return len;
     }
-    samples
-        .chunks(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
+    let mut count = 0;
+    for frame in samples.chunks(channels) {
+        if count >= output.len() { break; }
+        output[count] = frame.iter().sum::<f32>() / channels as f32;
+        count += 1;
+    }
+    count
 }

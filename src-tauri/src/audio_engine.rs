@@ -4,6 +4,7 @@ use crate::eq::{EqConfig, EqProcessor};
 use crate::explode::{ExplodeEffect, ExplodeState};
 use crate::audio_init::{init_audio_devices, init_monitor, warmup_streams};
 use crate::audio_process::{FrameState, FrameDeps, process_frame};
+use crate::explode::ExplodeAudioState;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -12,7 +13,7 @@ use tauri::{AppHandle, Emitter};
 use wasapi::*;
 pub use crate::debug::debug_log;
 use crate::device::find_device;
-pub use crate::audio_utils::{bytes_to_f32_samples, downmix_to_mono, resample_linear};
+pub use crate::audio_utils::{bytes_to_f32_samples_into, downmix_to_mono_into, resample_in_place};
 pub use crate::bgm::list_audio_processes;
 pub use crate::bgm::bgm_process_loop;
 
@@ -86,7 +87,6 @@ pub struct AudioEngine {
     /// 引擎重启前 BGM 是否激活，用于自动恢复
     bgm_was_active: Arc<AtomicBool>,
     explode_enabled: Arc<AtomicBool>,
-    explode_intensity: Arc<AtomicU32>,
     explode_state: Arc<ExplodeState>,
     monitor_enabled: Arc<AtomicBool>,
     monitor_point: Arc<AtomicU32>,
@@ -118,7 +118,6 @@ impl AudioEngine {
             bgm_thread_running: parking_lot::Mutex::new(Arc::new(AtomicBool::new(false))),
             bgm_was_active: Arc::new(AtomicBool::new(false)),
             explode_enabled: Arc::new(AtomicBool::new(false)),
-            explode_intensity: Arc::new(AtomicU32::new(50)),
             explode_state: Arc::new(ExplodeState::new()),
             monitor_enabled: Arc::new(AtomicBool::new(false)),
             monitor_point: Arc::new(AtomicU32::new(0)),
@@ -164,7 +163,6 @@ impl AudioEngine {
         let bgm_gain = self.bgm_gain.clone();
         let bgm_receiver = self.bgm_receiver.clone();
         let explode_enabled = self.explode_enabled.clone();
-        let explode_intensity = self.explode_intensity.clone();
         let explode_state = self.explode_state.clone();
         let monitor_enabled = self.monitor_enabled.clone();
         let monitor_point = self.monitor_point.clone();
@@ -194,7 +192,6 @@ impl AudioEngine {
                 mn,
                 rd,
                 explode_enabled,
-                explode_intensity,
                 explode_state,
                 monitor_enabled,
                 monitor_point,
@@ -399,9 +396,10 @@ impl AudioEngine {
         self.explode_state.enabled.store(enabled, Ordering::Relaxed);
     }
 
-    /// 设置爆炸强度 (1-100)
+    /// 设置爆炸强度 (1-100)，所有效果共用此滑块
     pub fn set_explode_intensity(&self, intensity: u32) {
-        self.explode_intensity.store(intensity.clamp(1, 100), Ordering::Relaxed);
+        let val = intensity.clamp(1, 100);
+        self.explode_state.intensity.store(val, Ordering::Relaxed);
     }
 
     /// 设置爆炸效果类型
@@ -433,20 +431,25 @@ impl AudioEngine {
 
 // BGM 相关代码（list_audio_processes, bgm_process_loop, APP_NAME_MAP 等）已移至 bgm.rs
 
-// ====== 音频处理链：将原始字节转为 f32 mono 48kHz ======
+// ====== 音频处理链：将原始字节转为 f32 mono 48kHz（零分配，写入预分配 buffer）======
 fn process_input(
     raw_bytes: &[u8],
     bits: u16,
     sample_type: &SampleType,
     channels: usize,
     sample_rate: u32,
-) -> Vec<f32> {
-    let raw_samples = bytes_to_f32_samples(raw_bytes, bits, sample_type, channels);
-    let mono = downmix_to_mono(&raw_samples, channels);
+    work_a: &mut [f32],
+    work_b: &mut [f32],
+    output: &mut [f32],
+) -> usize {
+    let n = bytes_to_f32_samples_into(raw_bytes, bits, sample_type, channels, work_a);
+    let m = downmix_to_mono_into(&work_a[..n], channels, work_b);
     if sample_rate != 48000 {
-        resample_linear(&mono, sample_rate, 48000)
+        resample_in_place(&work_b[..m], sample_rate, 48000, output)
     } else {
-        mono
+        let len = m.min(output.len());
+        output[..len].copy_from_slice(&work_b[..len]);
+        len
     }
 }
 
@@ -501,22 +504,32 @@ fn output_thread(
         // 2. 等设备就绪
         let _ = res.event.wait_for_event(100);
 
-        // 3. 查当前缓冲区占用
+        // 3. 再次收集（等待期间可能有新数据到达）
+        while let Ok(data) = receiver.try_recv() {
+            output_buf.extend_from_slice(&data);
+        }
+
+        // 4. 查当前缓冲区占用
         let padding = res.client.get_current_padding().unwrap_or(0) as usize;
         let buffer_frames = res.buffer_frames as usize;
         let available = buffer_frames.saturating_sub(padding);
+        if available == 0 {
+            continue;
+        }
+
         let valid_len = output_buf.len() - read_pos;
 
-        if available == 0 || valid_len == 0 {
-            // 全部消费完 → reset
-            if read_pos > 0 && read_pos == output_buf.len() {
-                output_buf.clear();
-                read_pos = 0;
+        if valid_len == 0 {
+            // 缓冲区空：写静音保持流连续，避免欠载卡顿
+            let frames_to_write = frame_size.min(available);
+            let silence = vec![0u8; frames_to_write * output_bytes_per_frame];
+            if res.render.write_to_device(frames_to_write, &silence, None).is_ok() {
+                write_ok_count += 1;
             }
             continue;
         }
 
-        // 4. 一次性写满可用空间
+        // 5. 一次性写满可用空间
         let frames_to_write = (valid_len / output_bytes_per_frame).min(available);
         let write_bytes = frames_to_write * output_bytes_per_frame;
         if write_bytes > 0 {
@@ -537,7 +550,7 @@ fn output_thread(
             }
         }
 
-        // 5. 溢出保护：缓冲区过大时丢弃旧数据
+        // 6. 溢出保护：缓冲区过大时丢弃旧数据
         let max_buf = frame_bytes * 20;
         if output_buf.len() > max_buf {
             let drain = output_buf.len() - max_buf;
@@ -546,7 +559,7 @@ fn output_thread(
             debug_log(&format!("output_thread: dropped {} bytes (overflow), buf={}bytes", drain, output_buf.len()));
         }
 
-        // 6. 每 5 秒输出一次统计
+        // 7. 每 5 秒输出一次统计
         if stats_start.elapsed().as_secs() >= 5 {
             let pending = (output_buf.len() - read_pos) / output_bytes_per_frame;
             debug_log(&format!(
@@ -558,7 +571,7 @@ fn output_thread(
             stats_start = std::time::Instant::now();
         }
 
-        // 7. BGM 漂移补偿
+        // 8. BGM 漂移补偿
         let pending_frames = (output_buf.len() - read_pos) / output_bytes_per_frame;
         let skip = if pending_frames > frame_size * 2 {
             0.05
@@ -590,7 +603,6 @@ fn audio_loop(
     model_name: Option<String>,
     resource_dir: Option<std::path::PathBuf>,
     explode_enabled: Arc<AtomicBool>,
-    _explode_intensity: Arc<AtomicU32>,
     explode_state: Arc<ExplodeState>,
     monitor_enabled: Arc<AtomicBool>,
     monitor_point: Arc<AtomicU32>,
@@ -711,10 +723,18 @@ fn audio_loop(
         work_buf_b: vec![0.0f32; frame_size],
         resample_buf: vec![0.0f32; max_output_frames],
         monitor_resample_buf: vec![0.0f32; max_output_frames],
+        explode_audio: ExplodeAudioState::new(),
+        input_read_pos: 0,
+        clear_input_acc: false,
+        input_work_a: vec![0.0f32; 1920], // max input per read
+        input_work_b: vec![0.0f32; 1920],
     };
 
     let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];
     let mut input_acc: Vec<f32> = Vec::new();
+    // 输出 buffer 池：轮换使用，避免每帧 .to_vec() 堆分配
+    let mut output_buf_pool: Vec<Vec<u8>> = (0..4).map(|_| vec![0u8; max_output_frames * output_bytes_per_frame]).collect();
+    let mut output_buf_idx: usize = 0;
     let mut last_strength = -1.0f32;
     let mut loop_iteration: u64 = 0;
     let mut consecutive_zero_reads: u32 = 0;
@@ -766,7 +786,6 @@ fn audio_loop(
         monitor_point: &monitor_point,
         explode_enabled: &explode_enabled,
         explode_state: &explode_state,
-        output_tx: &output_tx,
         stats: &stats,
         saved_model_states: &saved_model_states,
         model_name: model_name.as_deref(),
@@ -833,20 +852,42 @@ fn audio_loop(
                         frames_read, all_zero, all_same, &buf_slice[..buf_slice.len().min(16)]));
                 }
 
-                let resampled = process_input(
+                let resampled_len = process_input(
                     &input_buffer[..bytes_read],
                     input_bits, &input_sample_type,
                     input_channels, input_sample_rate,
+                    &mut frame_state.input_work_a,
+                    &mut frame_state.input_work_b,
+                    &mut frame_state.resample_buf,
                 );
-                input_acc.extend_from_slice(&resampled);
+                input_acc.extend_from_slice(&frame_state.resample_buf[..resampled_len]);
 
                 // 每攒够 frame_size (480) 个样本就处理一帧
-                while input_acc.len() >= frame_size {
-                    // 先复制到栈上再 drain，避免 Vec 堆分配
+                while input_acc.len() - frame_state.input_read_pos >= frame_size {
+                    let start = frame_state.input_read_pos;
                     let mut chunk = [0.0f32; 480];
-                    chunk.copy_from_slice(&input_acc[..frame_size]);
-                    input_acc.drain(..frame_size);
-                    process_frame(&chunk, &current_config, &mut frame_state, &deps, &mut input_acc);
+                    chunk.copy_from_slice(&input_acc[start..start + frame_size]);
+                    frame_state.input_read_pos += frame_size;
+                    let out_bytes = process_frame(&chunk, &current_config, &mut frame_state, &deps);
+                    // 用 buffer 池轮换发送，避免每帧 .to_vec() 堆分配
+                    if out_bytes > 0 {
+                        let mut buf = std::mem::take(&mut output_buf_pool[output_buf_idx]);
+                        buf.clear();
+                        buf.extend_from_slice(&frame_state.output_buffer[..out_bytes]);
+                        if output_tx.try_send(buf).is_err() && frame_state.frame_count % 2400 == 0 {
+                            debug_log("output channel full or closed, dropped frame");
+                        }
+                        output_buf_idx = (output_buf_idx + 1) % output_buf_pool.len();
+                    }
+                }
+                // 消费完毕，清空 acc（保留未处理的尾部）
+                if frame_state.clear_input_acc {
+                    input_acc.clear();
+                    frame_state.input_read_pos = 0;
+                    frame_state.clear_input_acc = false;
+                } else if frame_state.input_read_pos > 0 {
+                    input_acc.drain(..frame_state.input_read_pos);
+                    frame_state.input_read_pos = 0;
                 }
             }
             Err(e) => {
