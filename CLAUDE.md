@@ -146,6 +146,7 @@ scripts/                # 构建/发布辅助脚本
 - **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
 - **WASAPI 输出缓冲区溢出**：`output_buffer` 按 `frame_size * output_bytes_per_frame` 分配，但重采样后 `out_frames` 可能膨胀（如输出设备 96kHz 时翻倍）。必须按 `frame_size * (output_sample_rate / 48000).ceil()` 分配最大可能的缓冲区大小
 - **WASAPI 输出 padding 跳帧**：当缓冲区 > 20ms 时跳过写入会导致可听到的卡顿。应始终写入，让 WASAPI 处理背压。跳过帧 = 音频间隙 = 卡麦
+- **WASAPI 输出线程 recv_timeout 阻塞**：`output_thread` 中 `receiver.recv_timeout(1s)` 超时后直接 `continue` 会跳过写入，导致缓冲区欠载产生音频断续。必须用 `try_recv` 非阻塞接收，只要有缓冲数据就立即写入
 - **EQ 后缺少 NaN/Inf 检查**：Biquad IIR 滤波器在极端参数下可能输出 NaN/Inf，穿透 BGM 混音污染输出。必须在 EQ 处理后添加 `is_finite()` 检查
 - **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>1000）但降噪输出全零（<1）连续 10 帧时，重建模型并清除 `saved_model_states`。阈值不能太低（如 >100/3 帧），正常键盘鼠标声被正确降噪时会被误判为模型损坏
 - **Tauri 托盘左键点击**：`TrayIconBuilder` 默认左键也会弹右键菜单。用 `.show_menu_on_left_click(false)` 禁止左键弹菜单，配合 `.on_tray_icon_event` 处理左键单击打开主窗口
