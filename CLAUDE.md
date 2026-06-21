@@ -62,13 +62,16 @@ src/                    # Vue 前端
   tutorial-main.ts      # 教程窗口入口
   eq-main.ts            # 均衡器窗口入口
 src-tauri/src/          # Rust 后端
-  audio_engine.rs       # WASAPI 音频引擎（主循环 + 配置结构体）
+  audio_engine.rs       # WASAPI 音频引擎（主循环 + 输出线程 + 配置结构体）
+  audio_init.rs         # 音频设备初始化（输入/输出/监听 WASAPI 客户端配置）
+  audio_process.rs      # 帧处理（降噪→增益→EQ→爆炸→BGM混音→限幅）
   audio_utils.rs        # 音频工具函数（格式转换、重采样、监听写入）
   bgm.rs                # BGM 进程捕获（WASAPI Loopback）
   debug.rs              # 调试日志（%TEMP%\meowmic-debug.log）
   device.rs             # 设备查找
   denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs FFI）
   eq.rs                 # EQ 均衡器（Biquad IIR 滤波器 + 10 段 Peaking EQ）
+  explode.rs            # 爆炸模式（方波失真/电流声/白噪音/机器人声/恶魔声）
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
   lib.rs                # Tauri 命令注册 + 系统托盘 + 设置管理
 docs/                   # 文档
@@ -163,6 +166,7 @@ scripts/                # 构建/发布辅助脚本
 - **DeepFilterNet 输入范围**：DLL 期望 [-1.0, 1.0] 标准化音频，但我们的管线使用 i16 范围 [-32768, 32767]。必须在 `process_frame` 中除以 32768 归一化后传入 DLL，输出再乘以 32768 还原。同时 `has_internal_strength_control()` 返回 true 避免外部 strength mixing 双重衰减
 - **DeepFilterNet reduce_mask**：DLL 的 `reduce_mask` 参数 0=NONE(Independent), 1=MAX, 2=MEAN。GUI 默认用 0，不要传 2
 - **nnnoiseless 输入范围**：RNNoise 期望 i16 范围 [-32768, 32767]，内部静音阈值按此校准。归一化到 [-1, 1] 会导致所有帧被判定为静音直接跳过，完全丧失降噪能力
+- **爆炸模式 dual-flag**：`explode_enabled`（AudioEngine 控制是否调用 `process_explode_into`）和 `explode_state.enabled`（ExplodeState 内部控制是否实际处理）是两个独立 flag。`set_explode_mode()` 必须同时同步两者，否则爆炸效果被跳过但调用链正常执行，表现为"开关打开了但没效果"
 
 ## 版本号管理
 
