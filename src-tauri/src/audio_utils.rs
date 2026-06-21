@@ -38,42 +38,56 @@ pub fn compute_spectrum(samples: &[f32], bands: usize) -> Vec<f32> {
     spectrum
 }
 
-/// 将 f32 样本写入监听设备
+/// 将 f32 样本写入监听设备（非阻塞，使用预分配的 monitor_buffer）
+///
+/// `monitor_buffer` 必须足够大以容纳重采样后的数据（至少 `samples.len() * (monitor_sample_rate / 48000).ceil() * 4` 字节）
 pub fn write_to_monitor(
     samples: &[f32],
     render_opt: &Option<AudioRenderClient>,
     event_opt: &Option<wasapi::Handle>,
-    buffer: &mut [u8],
+    monitor_buffer: &mut [u8],
     monitor_sample_rate: u32,
+    resample_buf: &mut [f32],
 ) {
     let render = match render_opt {
         Some(r) => r,
         None => return,
     };
-    let ready = match event_opt {
-        Some(evt) => evt.wait_for_event(10).is_ok(),
-        None => true,
-    };
-    if !ready {
-        return;
-    }
-    // 重采样到监听设备采样率
-    let resampled = if monitor_sample_rate != 48000 {
-        resample_linear(samples, 48000, monitor_sample_rate)
-    } else {
-        samples.to_vec()
-    };
-    let stereo = upmix_to_stereo(&resampled, 2);
-    for (i, &sample) in stereo.iter().enumerate() {
-        let val = (sample.clamp(-32768.0, 32767.0)) as i16;
-        let bytes = val.to_le_bytes();
-        if i * 2 + 1 < buffer.len() {
-            buffer[i * 2] = bytes[0];
-            buffer[i * 2 + 1] = bytes[1];
+
+    // 非阻塞：只在 event 就绪时写入，否则丢弃本帧
+    if let Some(evt) = event_opt {
+        if evt.wait_for_event(0).is_err() {
+            return; // 设备还没消费完，丢弃本帧
         }
     }
-    let frames = resampled.len();
-    let _ = render.write_to_device(frames, &buffer[..frames * 4], None);
+
+    // 重采样到监听设备采样率（写入 resample_buf，避免堆分配）
+    let frames = if monitor_sample_rate != 48000 {
+        resample_in_place(samples, 48000, monitor_sample_rate, resample_buf)
+    } else {
+        let len = samples.len().min(resample_buf.len());
+        resample_buf[..len].copy_from_slice(&samples[..len]);
+        len
+    };
+
+    let stereo_bytes = frames * 4; // 每帧 stereo i16 = 4 bytes
+    if stereo_bytes > monitor_buffer.len() {
+        return;
+    }
+
+    // 单声道 → 立体声 + f32 → i16 + 写入 monitor_buffer
+    for i in 0..frames {
+        let val = resample_buf[i].clamp(-32768.0, 32767.0) as i16;
+        let bytes = val.to_le_bytes();
+        let pos = i * 4;
+        if pos + 4 <= monitor_buffer.len() {
+            monitor_buffer[pos] = bytes[0];
+            monitor_buffer[pos + 1] = bytes[1];
+            monitor_buffer[pos + 2] = bytes[0]; // 立体声复制
+            monitor_buffer[pos + 3] = bytes[1];
+        }
+    }
+    let _ = render.write_to_device(frames, &monitor_buffer[..stereo_bytes], None);
 }
 
 /// 线性插值重采样：将音频从 from_rate 重采样到 to_rate
@@ -96,6 +110,29 @@ pub fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> 
         output.push(sample);
     }
     output
+}
+
+/// 线性插值重采样（写入预分配的 output buffer，返回实际写入的样本数）
+pub fn resample_in_place(input: &[f32], from_rate: u32, to_rate: u32, output: &mut [f32]) -> usize {
+    if from_rate == to_rate || input.is_empty() {
+        let len = input.len().min(output.len());
+        output[..len].copy_from_slice(&input[..len]);
+        return len;
+    }
+    let ratio = from_rate as f64 / to_rate as f64;
+    let output_len = (input.len() as f64 / ratio) as usize;
+    let output_len = output_len.min(output.len());
+    for i in 0..output_len {
+        let src_pos = i as f64 * ratio;
+        let src_idx = src_pos as usize;
+        let frac = src_pos - src_idx as f64;
+        output[i] = if src_idx + 1 < input.len() {
+            input[src_idx] * (1.0 - frac as f32) + input[src_idx + 1] * frac as f32
+        } else {
+            input[src_idx]
+        };
+    }
+    output_len
 }
 
 /// 将原始字节样本（i16 或 f32）转换为 f32 归一化值
@@ -151,16 +188,5 @@ pub fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     samples
         .chunks(channels)
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-/// 单声道转多声道（复制到每个声道）
-pub fn upmix_to_stereo(samples: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-    samples
-        .iter()
-        .flat_map(|&s| vec![s; channels])
         .collect()
 }

@@ -1,7 +1,55 @@
+<template>
+  <div class="explode-control">
+    <div class="control-header">
+      <span class="label">💥 {{ t('explode.start') }}</span>
+      <button
+        class="toggle"
+        :class="{ active: enabled }"
+        @click="toggleEnabled"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
+
+    <!-- 效果选择 -->
+    <div class="effect-chips">
+      <button
+        v-for="effect in effects"
+        :key="effect.value"
+        class="effect-chip"
+        :class="{ active: selectedEffect === effect.value }"
+        @click="selectEffect(effect.value)"
+      >
+        {{ effect.icon }} {{ effect.label }}
+      </button>
+    </div>
+
+    <!-- 强度滑块 -->
+    <div class="intensity-controls">
+      <div class="intensity-row">
+        <span class="intensity-label">{{ t('explode.intensity') }}</span>
+        <div class="slider-wrapper">
+          <input
+            type="range"
+            min="1"
+            max="100"
+            :value="intensity"
+            @input="onIntensityInput"
+            class="slider"
+          />
+        </div>
+        <span class="intensity-value">{{ intensity }}%</span>
+      </div>
+    </div>
+  </div>
+</template>
+
 <script setup lang="ts">
-import { computed, onUnmounted } from 'vue'
-import { useI18n } from 'vue-i18n'
+import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   intensity: number
@@ -13,136 +61,105 @@ const emit = defineEmits<{
   'update:enabled': [value: boolean]
 }>()
 
-const { t } = useI18n()
+const selectedEffect = ref(0)
 
-const intensityPercent = computed(() => Math.round(props.intensity * 100))
+const effects = [
+  { value: 0, icon: '🔊', label: '经典爆音' },
+  { value: 1, icon: '⚡', label: '电流声' },
+  { value: 2, icon: '💥', label: '破音' },
+  { value: 3, icon: '📻', label: '白噪音' },
+  { value: 4, icon: '🤖', label: '机器人' },
+  { value: 5, icon: '👿', label: '恶魔' },
+]
 
-const sliderColor = computed(() => {
-  const pct = intensityPercent.value
-  if (pct < 33) return '#f97316'
-  if (pct < 66) return '#ef4444'
-  return '#dc2626'
-})
+const EFFECT_KEY = 'meowmic-explode-effect'
 
-const toggle = async () => {
-  const next = !props.enabled
-  emit('update:enabled', next)
-  await invoke('set_explode_mode', { enabled: next, intensity: Math.round(props.intensity * 100) })
-}
-
-const handleSliderInput = async (e: Event) => {
-  const val = Number((e.target as HTMLInputElement).value)
-  emit('update:intensity', val / 100)
-  // 如果正在炸麦，实时更新强度
-  if (props.enabled) {
-    await invoke('set_explode_mode', { enabled: true, intensity: val })
+async function toggleEnabled() {
+  const newEnabled = !props.enabled
+  emit('update:enabled', newEnabled)
+  try {
+    await invoke('set_explode_mode', {
+      enabled: newEnabled,
+      intensity: props.intensity
+    })
+    // 同步当前选择的效果类型
+    if (newEnabled) {
+      await invoke('set_explode_effect', { effect: selectedEffect.value })
+    }
+  } catch (e) {
+    console.error('Failed to toggle explode mode:', e)
   }
 }
 
-onUnmounted(() => {
-  if (props.enabled) {
-    invoke('set_explode_mode', { enabled: false }).catch(() => {})
+function onIntensityInput(e: Event) {
+  const target = e.target as HTMLInputElement
+  const value = parseInt(target.value, 10)
+  emit('update:intensity', value)
+  invoke('set_explode_mode', {
+    enabled: props.enabled,
+    intensity: value
+  }).catch(e => console.error('Failed to update explode intensity:', e))
+}
+
+function selectEffect(effect: number) {
+  selectedEffect.value = effect
+  localStorage.setItem(EFFECT_KEY, effect.toString())
+  invoke('set_explode_effect', { effect }).catch(e => console.error('Failed to set explode effect:', e))
+}
+
+onMounted(() => {
+  const savedEffect = localStorage.getItem(EFFECT_KEY)
+  if (savedEffect !== null) {
+    selectedEffect.value = parseInt(savedEffect, 10) || 0
   }
 })
 </script>
 
-<template>
-  <div class="explode-section">
-    <div class="setting-row">
-      <div class="setting-info">
-        <span class="setting-label">
-          <span class="explode-icon">💥</span>
-          {{ t('explode.start') }}
-        </span>
-      </div>
-      <button
-        class="toggle"
-        :class="{ active: enabled }"
-        @click="toggle"
-      >
-        <span class="toggle-knob"></span>
-      </button>
-    </div>
-
-    <div class="slider-section">
-      <div class="slider-header">
-        <span class="slider-label">{{ t('explode.intensity') }}</span>
-        <span class="slider-value" :style="{ color: sliderColor }">{{ intensityPercent }}%</span>
-      </div>
-      <div class="slider-track">
-        <input
-          type="range"
-          min="1"
-          max="100"
-          :value="intensityPercent"
-          @input="handleSliderInput"
-          class="slider"
-          :style="{ '--slider-color': sliderColor }"
-        />
-      </div>
-      <div class="slider-labels">
-        <span>🔊</span>
-        <span>📢</span>
-        <span>💥</span>
-      </div>
-    </div>
-  </div>
-</template>
-
 <style scoped>
-.explode-section {
+.explode-control {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.setting-row {
+.control-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
-.setting-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.setting-label {
-  font-size: 13px;
-  font-weight: 600;
+.label {
+  font-size: 14px;
+  font-weight: 500;
   color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
-.explode-icon {
-  font-size: 16px;
+.setting-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
 }
 
-/* Toggle */
 .toggle {
-  width: 44px;
-  height: 24px;
-  border-radius: 12px;
+  width: 48px;
+  height: 26px;
+  border-radius: 13px;
   border: none;
   background: var(--border);
   cursor: pointer;
   position: relative;
   transition: background 0.3s;
   padding: 0;
-  flex-shrink: 0;
 }
 
 .toggle.active {
-  background: var(--danger);
+  background: var(--accent);
 }
 
 .toggle-knob {
   position: absolute;
-  top: 2px;
-  left: 2px;
+  top: 3px;
+  left: 3px;
   width: 20px;
   height: 20px;
   border-radius: 50%;
@@ -151,34 +168,57 @@ onUnmounted(() => {
 }
 
 .toggle.active .toggle-knob {
-  transform: translateX(20px);
+  transform: translateX(22px);
 }
 
-.slider-section {
+.effect-chips {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.slider-header {
+.effect-chip {
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.effect-chip:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.effect-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.intensity-controls {
+  margin-top: 4px;
+}
+
+.intensity-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 10px;
 }
 
-.slider-label {
+.intensity-label {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-muted);
+  min-width: 50px;
+  flex-shrink: 0;
 }
 
-.slider-value {
-  font-size: 12px;
-  font-weight: 600;
-  font-family: 'DM Mono', monospace;
-}
-
-.slider-track {
-  width: 100%;
+.slider-wrapper {
+  flex: 1;
 }
 
 .slider {
@@ -193,33 +233,25 @@ onUnmounted(() => {
 
 .slider::-webkit-slider-thumb {
   appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--slider-color);
+  background: var(--accent);
   cursor: pointer;
-  box-shadow: 0 0 8px var(--slider-color);
+  box-shadow: 0 0 6px var(--accent);
   transition: transform 0.2s;
 }
 
 .slider::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
+  transform: scale(1.15);
 }
 
-.slider::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--slider-color);
-  cursor: pointer;
-  border: none;
-  box-shadow: 0 0 8px var(--slider-color);
-}
-
-.slider-labels {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  color: var(--text-muted);
+.intensity-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  min-width: 35px;
+  text-align: right;
+  font-family: 'DM Mono', monospace;
 }
 </style>

@@ -1,4 +1,6 @@
 mod audio_engine;
+mod audio_init;
+mod audio_process;
 mod audio_utils;
 mod bgm;
 mod debug;
@@ -6,9 +8,12 @@ mod denoise;
 mod device;
 mod device_watcher;
 mod eq;
+mod explode;
 
 use audio_engine::{AudioEngine, AudioStats};
+use audio_engine::debug_log;
 use eq::{EqConfig, EQ_FREQUENCIES, EQ_PRESET_NAMES};
+use explode::ExplodeEffect;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -387,7 +392,15 @@ fn set_explode_mode(state: State<'_, EngineState>, enabled: bool, intensity: Opt
 }
 
 #[tauri::command]
+fn set_explode_effect(state: State<'_, EngineState>, effect: u32) -> Result<(), String> {
+    let engine = state.engine.lock();
+    engine.set_explode_effect(ExplodeEffect::from_u32(effect));
+    Ok(())
+}
+
+#[tauri::command]
 fn set_monitor_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), String> {
+    debug_log(&format!("set_monitor_mode: enabled={}", enabled));
     let engine = state.engine.lock();
     engine.set_monitor_enabled(enabled);
     Ok(())
@@ -485,6 +498,7 @@ pub fn run() {
             stop_bgm,
             update_bgm_config,
             set_explode_mode,
+            set_explode_effect,
             set_monitor_mode,
             set_monitor_point,
             update_eq_config,

@@ -245,6 +245,29 @@ const handleStart = async () => {
     if (monitorPoint.value > 0) {
       await setMonitorPoint(monitorPoint.value)
     }
+    // 同步 EQ 配置到后端（开关 + bands）
+    if (eqEnabled.value) {
+      const savedPreset = localStorage.getItem('meowmic-eq-preset')
+      const savedBands = localStorage.getItem('meowmic-eq-bands')
+      let eqBands: number[] | null = null
+
+      if (savedPreset === 'custom' && savedBands) {
+        try { eqBands = JSON.parse(savedBands) } catch { eqBands = null }
+      } else if (savedPreset) {
+        // 从后端预设获取 bands
+        try {
+          const presets = await invoke<[string, number[]][]>('get_eq_presets')
+          const found = presets.find(([k]) => k === savedPreset)
+          if (found) eqBands = found[1]
+        } catch { /* ignore */ }
+      }
+
+      if (eqBands) {
+        await invoke('update_eq_config', { enabled: true, bands: eqBands })
+      } else {
+        await invoke('update_eq_config', { enabled: true })
+      }
+    }
     startPolling()
   } catch (e) {
     const msg = String(e)
@@ -255,6 +278,26 @@ const handleStart = async () => {
       await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
       if (monitorPoint.value > 0) {
         await setMonitorPoint(monitorPoint.value)
+      }
+      // 同步 EQ 配置到后端
+      if (eqEnabled.value) {
+        const savedPreset = localStorage.getItem('meowmic-eq-preset')
+        const savedBands = localStorage.getItem('meowmic-eq-bands')
+        let eqBands: number[] | null = null
+        if (savedPreset === 'custom' && savedBands) {
+          try { eqBands = JSON.parse(savedBands) } catch { eqBands = null }
+        } else if (savedPreset) {
+          try {
+            const presets = await invoke<[string, number[]][]>('get_eq_presets')
+            const found = presets.find(([k]) => k === savedPreset)
+            if (found) eqBands = found[1]
+          } catch { /* ignore */ }
+        }
+        if (eqBands) {
+          await invoke('update_eq_config', { enabled: true, bands: eqBands })
+        } else {
+          await invoke('update_eq_config', { enabled: true })
+        }
       }
       startPolling()
     } else if (msg.includes('AUDIO_DEVICE_CONFLICT')) {
