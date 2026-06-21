@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use wasapi::*;
 pub use crate::debug::debug_log;
 use crate::device::find_device;
@@ -586,12 +586,9 @@ fn output_thread(
     let mut frame_count: u64 = 0;
 
     while running.load(Ordering::Acquire) {
-        // 从 channel 接收处理后的音频数据（1秒超时，避免永久阻塞）
-        match receiver.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok(data) => {
-                output_buf.extend_from_slice(&data);
-            }
-            Err(_) => continue,
+        // 非阻塞接收新数据（避免阻塞导致写入延迟）
+        while let Ok(data) = receiver.try_recv() {
+            output_buf.extend_from_slice(&data);
         }
 
         // 等待 WASAPI 输出设备就绪
@@ -1004,6 +1001,8 @@ fn audio_loop(
     let mut loop_iteration: u64 = 0;
     let mut consecutive_zero_reads: u32 = 0;
     let mut consecutive_read_errors: u32 = 0;
+    let mut last_monitor_check_iteration: u64 = 0;
+    const MONITOR_CHECK_INTERVAL: u64 = 100; // 每 100 次循环检测一次（约 1 秒）
     while running.load(Ordering::Acquire) {
         if input_handle.wait_for_event(100).is_err() {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1012,6 +1011,27 @@ fn audio_loop(
 
         loop_iteration += 1;
         let current_config = config.read().clone();
+
+        // ====== 监听设备自动跟随：检测系统默认输出设备是否变化 ======
+        if loop_iteration - last_monitor_check_iteration >= MONITOR_CHECK_INTERVAL {
+            last_monitor_check_iteration = loop_iteration;
+            // 只有初始化时成功设置过监听设备才检测，避免初始化失败时反复触发重启
+            if !current_monitor_device_id.is_empty() {
+                if let Ok(new_default_output) = find_device(None, false) {
+                    let new_id = new_default_output.get_id().unwrap_or_default();
+                    if new_id != current_monitor_device_id && !new_id.is_empty() {
+                        log::info!("Monitor device changed: '{}' -> '{}'",
+                            current_monitor_device_id, new_id);
+                        debug_log(&format!("Monitor: device changed from '{}' to '{}', requesting restart",
+                            current_monitor_device_id, new_id));
+                        // 通知前端重启引擎
+                        if let Some(ref app) = _app_handle {
+                            let _ = app.emit("restart-needed", ());
+                        }
+                    }
+                }
+            }
+        }
 
         // DeepFilterNet: strength 变化时更新内部降噪强度
         if (current_config.strength - last_strength).abs() > f32::EPSILON {
