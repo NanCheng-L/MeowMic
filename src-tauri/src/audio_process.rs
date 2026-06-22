@@ -168,7 +168,6 @@ pub fn format_output_bytes(
                     }
                 }
             }
-            _ => log::warn!("Unsupported 32-bit output format: {:?}", output_sample_type),
         },
         64 => match output_sample_type {
             SampleType::Float => {
