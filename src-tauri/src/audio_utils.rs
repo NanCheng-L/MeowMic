@@ -30,7 +30,8 @@ pub fn compute_spectrum_into(samples: &[f32], output: &mut [f32]) {
         if val > 0.001 {
             val = (val.log10() + 3.0) / 3.0;
         }
-        output[i] = val.clamp(0.0, 1.0);
+        // 用 max/min 替代 clamp（clamp 遇到 NaN 会 panic）
+        output[i] = val.max(0.0).min(1.0);
     }
 }
 
@@ -182,4 +183,22 @@ pub fn downmix_to_mono_into(samples: &[f32], channels: usize, output: &mut [f32]
         count += 1;
     }
     count
+}
+
+/// 单声道 → 多声道扩展（写入预分配 buffer，避免堆分配）
+/// 返回实际写入的输出样本数 (= mono_len * channels, 受 output 容量限制)
+pub fn upmix_to_stereo_into(mono: &[f32], channels: usize, output: &mut [f32]) -> usize {
+    if channels <= 1 {
+        let len = mono.len().min(output.len());
+        output[..len].copy_from_slice(&mono[..len]);
+        return len;
+    }
+    let max_frames = (output.len() / channels).min(mono.len());
+    for i in 0..max_frames {
+        let val = mono[i];
+        for ch in 0..channels {
+            output[i * channels + ch] = val;
+        }
+    }
+    max_frames * channels
 }

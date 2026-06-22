@@ -64,11 +64,18 @@
 
 | 模块 | 说明 |
 |------|------|
-| audio_engine.rs | WASAPI 音频引擎（采集→处理→输出） |
-| denoise/ | 降噪模型（RNNoise / DeepFilterNet3） |
-| eq.rs | EQ 均衡器（Biquad IIR 滤波器） |
-| device_watcher.rs | 设备热拔插检测 |
-| lib.rs | Tauri 命令注册 + 系统托盘 |
+| audio_engine.rs | WASAPI 音频引擎（三线程架构：处理线程 + 输出线程） |
+| audio_init.rs | 音频设备初始化（输入/输出/监听 WASAPI 客户端配置） |
+| audio_process.rs | 帧处理管线（降噪→增益→EQ→爆炸→BGM混音→软限制） |
+| audio_utils.rs | 音频工具（格式转换、重采样、mono↔多声道、监听写入） |
+| bgm.rs | BGM 进程捕获（WASAPI Process Loopback） |
+| debug.rs | 调试日志（BufWriter 缓存写入 %TEMP%\meowmic-debug.log） |
+| device.rs | 设备查找（find_device） |
+| device_watcher.rs | 设备热拔插检测（后台轮询 + Tauri 事件） |
+| denoise/ | 降噪模型（RNNoise 原生 / DeepFilterNet3 FFI） |
+| eq.rs | EQ 均衡器（10 段 Biquad IIR Peaking EQ + 预设） |
+| explode.rs | 爆炸模式（7 种效果：方波/电流/破音/白噪/机器人/恶魔/回音） |
+| lib.rs | Tauri 命令注册 + 系统托盘 + 设置管理 |
 
 ### 降噪架构
 
@@ -205,10 +212,17 @@ src/                    # Vue 3 前端
 │   ├── useAudioStats   # 统计轮询
 │   └── useSettings     # 设置读写
 src-tauri/src/          # Rust 后端
-├── audio_engine.rs     # WASAPI 音频引擎
-├── denoise/            # 降噪模型架构（trait + 适配器）
-├── eq.rs               # EQ 均衡器（Biquad IIR 滤波器）
+├── audio_engine.rs     # WASAPI 音频引擎（三线程架构）
+├── audio_init.rs       # 音频设备初始化
+├── audio_process.rs    # 帧处理管线
+├── audio_utils.rs      # 音频工具函数
+├── bgm.rs              # BGM 进程捕获
+├── debug.rs            # 调试日志
+├── device.rs           # 设备查找
 ├── device_watcher.rs   # 设备热拔插检测
+├── denoise/            # 降噪模型架构（trait + RNNoise + DeepFilterNet3 适配器）
+├── eq.rs               # EQ 均衡器（Biquad IIR 滤波器）
+├── explode.rs          # 爆炸模式（7 种效果）
 └── lib.rs              # Tauri 命令 + 系统托盘 + 设置管理
 docs/                   # 文档
 └── eq-spec.md          # 均衡器功能规格（参考 SteelSeries GG Sonar）

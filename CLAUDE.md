@@ -169,6 +169,8 @@ scripts/                # 构建/发布辅助脚本
 - **爆炸模式 dual-flag**：`explode_enabled`（AudioEngine 控制是否调用 `process_explode_into`）和 `explode_state.enabled`（ExplodeState 内部控制是否实际处理）是两个独立 flag。`set_explode_mode()` 必须同时同步两者，否则爆炸效果被跳过但调用链正常执行，表现为"开关打开了但没效果"
 - **音频热路径禁止堆分配**：音频线程 48kHz 每秒处理 50 帧，任何 `Vec::new()` / `.collect()` / `.to_vec()` / `.clone()` 都会在帧间产生堆分配，饿死 WASAPI 回调导致整个音频冻结（频谱也停止）。所有效果函数必须写入预分配的 output buffer（`process_explode_into` 的 `output: &mut [f32]`），`process_input` 必须用 `_into` 版本的工具函数写入预分配 buffer，输出 channel 发送用 buffer 池轮换而非 `.to_vec()`
 - **爆炸模式 echo 效果**：60% 强度 = 最大效果（`mix = (intensity / 60.0).min(1.0)`），延迟 10~80ms，反馈 0~0.4，湿声增益 0~0.8。delay_buf 大小 24000 samples（500ms @ 48kHz），延迟不能超过 buf_len 否则 usize 减法下溢
+- **format_output_bytes 单声道→立体声扩展缺失**：v0.2.8 的 `format_output_bytes` 有 `upmix_to_stereo()` 先扩展再写字节，模块拆分（`5218730`）后丢失这一步，`samples.chunks(output_channels)` 把相邻 mono 样本错拆到左右声道。同时 32-bit float 路径缺少 `/32767` 归一化。症状：输出有刺啦杂音，安静时明显说话时被语音掩盖。修复：iterate mono frames × duplicate to channels，float 归一化
+- **RNNoise/Biquad denormal 浮点数累积**：RNNoise 静音帧输出极小值（~1e-30），Biquad 滤波器 `y1/y2` 状态在长时间静音后累积 denormal。经 gain/EQ 放大后产生可闻刺啦声。修复：降噪+strength mixing 后 `abs() < 1e-10` flush to zero；Biquad `y1/y2` 同理
 
 ## 版本号管理
 

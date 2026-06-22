@@ -461,7 +461,6 @@ struct OutputResources {
     client: AudioClient,
     render: AudioRenderClient,
     event: wasapi::Handle,
-    buffer_frames: u32,
 }
 unsafe impl Send for OutputResources {}
 
@@ -494,8 +493,6 @@ fn output_thread(
     let mut write_err_count: u32 = 0;
     let mut stats_start = std::time::Instant::now();
     let frame_bytes = frame_size * output_bytes_per_frame;
-    // 预分配静音 buffer，避免 valid_len==0 时每帧堆分配
-    let silence_buf = vec![0u8; frame_bytes];
 
     while running.load(Ordering::Acquire) {
         // 1. 收集所有可用数据
@@ -503,59 +500,52 @@ fn output_thread(
             output_buf.extend_from_slice(&data);
         }
 
-        // 2. 等设备就绪
-        let _ = res.event.wait_for_event(100);
+        // 2. 等设备就绪（与 v0.2.8 一致）
+        if res.event.wait_for_event(100).is_err() {
+            continue;
+        }
 
         // 3. 再次收集（等待期间可能有新数据到达）
         while let Ok(data) = receiver.try_recv() {
             output_buf.extend_from_slice(&data);
         }
 
-        // 4. 查当前缓冲区占用
-        let padding = res.client.get_current_padding().unwrap_or(0) as usize;
-        let buffer_frames = res.buffer_frames as usize;
-        let available = buffer_frames.saturating_sub(padding);
-        if available == 0 {
-            continue;
-        }
+        // 4. 用 get_available_space_in_frames 获取可用空间（与 v0.2.8 一致）
+        let available = match res.client.get_available_space_in_frames() {
+            Ok(n) if n > 0 => n as usize,
+            _ => continue,
+        };
 
         let valid_len = output_buf.len() - read_pos;
 
-        if valid_len == 0 {
-            // 缓冲区空：写静音保持流连续，避免欠载卡顿
-            let frames_to_write = frame_size.min(available);
-            let silence_bytes = frames_to_write * output_bytes_per_frame;
-            if res.render.write_to_device(frames_to_write, &silence_buf[..silence_bytes], None).is_ok() {
-                write_ok_count += 1;
-            }
-            continue;
-        }
-
-        // 5. 一次性写满可用空间
-        let frames_to_write = (valid_len / output_bytes_per_frame).min(available);
-        let write_bytes = frames_to_write * output_bytes_per_frame;
-        if write_bytes > 0 {
-            match res.render.write_to_device(frames_to_write, &output_buf[read_pos..read_pos + write_bytes], None) {
-                Ok(()) => {
-                    write_ok_count += 1;
-                    read_pos += write_bytes;
-                    // 全部消费完 → reset
-                    if read_pos == output_buf.len() {
-                        output_buf.clear();
-                        read_pos = 0;
+        // 5. 有数据时一次性写满可用空间
+        if valid_len > 0 {
+            let frames_to_write = (valid_len / output_bytes_per_frame).min(available);
+            let write_bytes = frames_to_write * output_bytes_per_frame;
+            if write_bytes > 0 {
+                match res.render.write_to_device(frames_to_write, &output_buf[read_pos..read_pos + write_bytes], None) {
+                    Ok(()) => {
+                        write_ok_count += 1;
+                        read_pos += write_bytes;
+                        // 全部消费完 → reset
+                        if read_pos == output_buf.len() {
+                            output_buf.clear();
+                            read_pos = 0;
+                        }
+                        // 消费超过一半时 compact 一次（低频 O(n)，其余帧 O(1) 只推进 read_pos）
+                        if read_pos > output_buf.len() / 2 && read_pos > 0 {
+                            output_buf.drain(..read_pos);
+                            read_pos = 0;
+                        }
                     }
-                    // 消费超过一半时 compact 一次（低频 O(n)，其余帧 O(1) 只推进 read_pos）
-                    if read_pos > output_buf.len() / 2 && read_pos > 0 {
-                        output_buf.drain(..read_pos);
-                        read_pos = 0;
+                    Err(e) => {
+                        write_err_count += 1;
+                        log::warn!("output_thread: write error: {:?}", e);
                     }
-                }
-                Err(e) => {
-                    write_err_count += 1;
-                    log::warn!("output_thread: write error: {:?}", e);
                 }
             }
         }
+        // 无数据时不写任何东西（与 v0.2.8 一致）
 
         // 6. 溢出保护：pending 数据过多时只移 read_pos，不移动内存
         let max_buf = frame_bytes * 20;
@@ -692,12 +682,10 @@ fn audio_loop(
 
     // 7. 启动输出线程
     let (output_tx, output_rx) = bounded::<Vec<u8>>(10);
-    let output_buffer_frames = devices.output_client.get_bufferframecount().unwrap_or(0);
     let output_res = OutputResources {
         client: devices.output_client,
         render: devices.output_render,
         event: devices.output_handle,
-        buffer_frames: output_buffer_frames,
     };
     let bgm_skip_rate_out = bgm_skip_rate.clone();
     let running_out = running.clone();

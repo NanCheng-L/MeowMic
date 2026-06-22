@@ -82,101 +82,123 @@ pub struct PeakDiagnostics {
     pub output: f32,
 }
 
-/// 格式化输出字节
+/// 将 mono f32 样本（i16 范围）转换为多声道输出字节
+/// 对齐 v0.2.8 行为：mono→多声道扩展 + 各格式正确缩放
 pub fn format_output_bytes(
-    samples: &[f32],
+    samples: &[f32],        // mono 样本，值域 [-32768, 32767]
     output_buffer: &mut [u8],
     output_channels: usize,
     output_bytes_per_frame: usize,
     output_bits: u16,
     output_sample_type: &SampleType,
 ) -> usize {
-    let out_frames = samples.len() / output_channels;
-    let out_bytes = out_frames * output_bytes_per_frame;
+    let mono_frames = samples.len();
+    let out_bytes = mono_frames * output_bytes_per_frame;
+    let bytes_per_sample = output_bytes_per_frame / output_channels;
 
     match output_bits {
+        8 => match output_sample_type {
+            SampleType::Int => {
+                for (fi, &s) in samples.iter().enumerate() {
+                    let val = ((s / 128.0) + 128.0).max(0.0).min(255.0) as u8;
+                    for ch in 0..output_channels {
+                        let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                        if pos < output_buffer.len() {
+                            output_buffer[pos] = val;
+                        }
+                    }
+                }
+            }
+            _ => log::warn!("Unsupported 8-bit output format: {:?}", output_sample_type),
+        },
         16 => match output_sample_type {
             SampleType::Int => {
-                for (i, frame) in samples.chunks(output_channels).enumerate() {
-                    let offset = i * output_bytes_per_frame;
-                    if offset + output_bytes_per_frame <= output_buffer.len() {
-                        for (ch, &s) in frame.iter().enumerate() {
-                            let clamped = s.max(-32768.0).min(32767.0) as i16;
-                            let bytes = clamped.to_le_bytes();
-                            let pos = offset + ch * 2;
-                            if pos + 2 <= output_buffer.len() {
-                                output_buffer[pos] = bytes[0];
-                                output_buffer[pos + 1] = bytes[1];
-                            }
+                for (fi, &s) in samples.iter().enumerate() {
+                    let val = s.max(-32768.0).min(32767.0) as i16;
+                    let bytes = val.to_le_bytes();
+                    for ch in 0..output_channels {
+                        let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                        if pos + 2 <= output_buffer.len() {
+                            output_buffer[pos] = bytes[0];
+                            output_buffer[pos + 1] = bytes[1];
                         }
                     }
                 }
             }
-            _ => {
-                log::warn!("Unsupported 16-bit output format: {:?}", output_sample_type);
-            }
-        },
-        32 => match output_sample_type {
-            SampleType::Float => {
-                for (i, frame) in samples.chunks(output_channels).enumerate() {
-                    let offset = i * output_bytes_per_frame;
-                    if offset + output_bytes_per_frame <= output_buffer.len() {
-                        for (ch, &s) in frame.iter().enumerate() {
-                            let bytes = s.to_le_bytes();
-                            let pos = offset + ch * 4;
-                            if pos + 4 <= output_buffer.len() {
-                                output_buffer[pos] = bytes[0];
-                                output_buffer[pos + 1] = bytes[1];
-                                output_buffer[pos + 2] = bytes[2];
-                                output_buffer[pos + 3] = bytes[3];
-                            }
-                        }
-                    }
-                }
-            }
-            SampleType::Int => {
-                for (i, frame) in samples.chunks(output_channels).enumerate() {
-                    let offset = i * output_bytes_per_frame;
-                    if offset + output_bytes_per_frame <= output_buffer.len() {
-                        for (ch, &s) in frame.iter().enumerate() {
-                            let clamped = s.max(-2147483648.0).min(2147483647.0) as i32;
-                            let bytes = clamped.to_le_bytes();
-                            let pos = offset + ch * 4;
-                            if pos + 4 <= output_buffer.len() {
-                                output_buffer[pos] = bytes[0];
-                                output_buffer[pos + 1] = bytes[1];
-                                output_buffer[pos + 2] = bytes[2];
-                                output_buffer[pos + 3] = bytes[3];
-                            }
-                        }
-                    }
-                }
-            }
+            _ => log::warn!("Unsupported 16-bit output format: {:?}", output_sample_type),
         },
         24 => match output_sample_type {
             SampleType::Int => {
-                for (i, frame) in samples.chunks(output_channels).enumerate() {
-                    let offset = i * output_bytes_per_frame;
-                    if offset + output_bytes_per_frame <= output_buffer.len() {
-                        for (ch, &s) in frame.iter().enumerate() {
-                            let clamped = s.max(-8388608.0).min(8388607.0) as i32;
-                            let bytes = clamped.to_le_bytes();
-                            let pos = offset + ch * 3;
-                            if pos + 3 <= output_buffer.len() {
-                                output_buffer[pos] = bytes[0];
-                                output_buffer[pos + 1] = bytes[1];
-                                output_buffer[pos + 2] = bytes[2];
-                            }
+                for (fi, &s) in samples.iter().enumerate() {
+                    let val = (s * 256.0).max(-8388608.0).min(8388607.0) as i32;
+                    for ch in 0..output_channels {
+                        let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                        if pos + 3 <= output_buffer.len() {
+                            output_buffer[pos] = (val & 0xFF) as u8;
+                            output_buffer[pos + 1] = ((val >> 8) & 0xFF) as u8;
+                            output_buffer[pos + 2] = ((val >> 16) & 0xFF) as u8;
                         }
                     }
                 }
             }
-            _ => {
-                log::warn!("Unsupported 24-bit output format: {:?}", output_sample_type);
+            _ => log::warn!("Unsupported 24-bit output format: {:?}", output_sample_type),
+        },
+        32 => match output_sample_type {
+            SampleType::Int => {
+                for (fi, &s) in samples.iter().enumerate() {
+                    let val = (s * 65536.0).max(-2147483648.0).min(2147483647.0) as i32;
+                    let bytes = val.to_le_bytes();
+                    for ch in 0..output_channels {
+                        let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                        if pos + 4 <= output_buffer.len() {
+                            output_buffer[pos..pos + 4].copy_from_slice(&bytes);
+                        }
+                    }
+                }
             }
+            SampleType::Float => {
+                for (fi, &s) in samples.iter().enumerate() {
+                    let val = (s / 32767.0).max(-1.0).min(1.0);
+                    let bytes = val.to_le_bytes();
+                    for ch in 0..output_channels {
+                        let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                        if pos + 4 <= output_buffer.len() {
+                            output_buffer[pos..pos + 4].copy_from_slice(&bytes);
+                        }
+                    }
+                }
+            }
+            _ => log::warn!("Unsupported 32-bit output format: {:?}", output_sample_type),
+        },
+        64 => match output_sample_type {
+            SampleType::Float => {
+                for (fi, &s) in samples.iter().enumerate() {
+                    let val = (s as f64 / 32767.0).max(-1.0).min(1.0);
+                    let bytes = val.to_le_bytes();
+                    for ch in 0..output_channels {
+                        let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                        if pos + 8 <= output_buffer.len() {
+                            output_buffer[pos..pos + 8].copy_from_slice(&bytes);
+                        }
+                    }
+                }
+            }
+            _ => log::warn!("Unsupported 64-bit output format: {:?}", output_sample_type),
         },
         _ => {
-            log::warn!("Unsupported output bit depth: {}", output_bits);
+            // fallback to 16-bit
+            log::warn!("Unsupported output bit depth: {}, falling back to 16-bit", output_bits);
+            for (fi, &s) in samples.iter().enumerate() {
+                let val = s.max(-32768.0).min(32767.0) as i16;
+                let bytes = val.to_le_bytes();
+                for ch in 0..output_channels {
+                    let pos = fi * output_bytes_per_frame + ch * bytes_per_sample;
+                    if pos + 2 <= output_buffer.len() {
+                        output_buffer[pos] = bytes[0];
+                        output_buffer[pos + 1] = bytes[1];
+                    }
+                }
+            }
         }
     }
 
@@ -277,6 +299,14 @@ pub fn process_frame(
                     *denoised =
                         original * (1.0 - current_config.strength) + *denoised * current_config.strength;
                 });
+        }
+
+        // Denormal flush: RNNoise 在静音帧可能输出极小的非规格化浮点数，
+        // 经过 gain/EQ 放大后产生刺啦声。强制 flush to zero。
+        for sample in output_frame.iter_mut() {
+            if sample.abs() < 1e-10 {
+                *sample = 0.0;
+            }
         }
     }
 
