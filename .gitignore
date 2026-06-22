@@ -37,3 +37,6 @@ test_output/
 
 # Training
 training/
+
+# Temp files
+tmp_query*.py

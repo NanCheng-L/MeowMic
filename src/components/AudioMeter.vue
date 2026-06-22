@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps<{
   label: string
@@ -7,6 +7,7 @@ const props = defineProps<{
   color?: string
 }>()
 
+const canvasRef = ref<HTMLCanvasElement | null>(null)
 const segments = 32
 
 const activeSegments = computed(() => {
@@ -15,16 +16,73 @@ const activeSegments = computed(() => {
   return Math.round(normalized * segments)
 })
 
-const segmentColor = (index: number) => {
-  if (index < 21) return 'var(--accent)'
-  if (index < 27) return 'var(--warning)'
-  return 'var(--danger)'
-}
-
 const displayLevel = computed(() => {
   if (props.level <= -100) return '-∞'
   return `${props.level.toFixed(1)} dB`
 })
+
+function getColors() {
+  const style = getComputedStyle(document.documentElement)
+  return {
+    border: style.getPropertyValue('--border').trim() || '#1e1e1e',
+    accent: style.getPropertyValue('--accent').trim() || '#10b981',
+    warning: style.getPropertyValue('--warning').trim() || '#f59e0b',
+    danger: style.getPropertyValue('--danger').trim() || '#ef4444',
+  }
+}
+
+function drawMeter() {
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  const dpr = window.devicePixelRatio || 1
+  const w = canvas.clientWidth
+  const h = canvas.clientHeight || 8
+  canvas.width = w * dpr
+  canvas.height = h * dpr
+
+  ctx.scale(dpr, dpr)
+
+  const colors = getColors()
+  const gap = 2
+  const segW = (w - (segments - 1) * gap) / segments
+  const segH = h
+  const active = activeSegments.value
+
+  for (let i = 0; i < segments; i++) {
+    const x = i * (segW + gap)
+    if (i < active) {
+      if (i < 21) ctx.fillStyle = colors.accent
+      else if (i < 27) ctx.fillStyle = colors.warning
+      else ctx.fillStyle = colors.danger
+    } else {
+      ctx.fillStyle = colors.border
+    }
+    ctx.beginPath()
+    ctx.roundRect(x, 0, segW, segH, 1)
+    ctx.fill()
+  }
+}
+
+let resizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  const canvas = canvasRef.value
+  if (canvas) {
+    resizeObserver = new ResizeObserver(drawMeter)
+    resizeObserver.observe(canvas)
+  }
+  drawMeter()
+})
+
+onUnmounted(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
+
+watch(activeSegments, drawMeter)
 </script>
 
 <template>
@@ -34,16 +92,7 @@ const displayLevel = computed(() => {
       <span class="level-value">{{ displayLevel }}</span>
     </div>
     <div class="meter-bar">
-      <div
-        v-for="i in segments"
-        :key="i"
-        class="segment"
-        :class="{ active: i <= activeSegments }"
-        :style="{
-          '--segment-color': segmentColor(i - 1),
-          animationDelay: `${i * 10}ms`
-        }"
-      ></div>
+      <canvas ref="canvasRef"></canvas>
     </div>
   </div>
 </template>
@@ -76,20 +125,13 @@ const displayLevel = computed(() => {
 }
 
 .meter-bar {
-  display: flex;
-  gap: 2px;
   height: 8px;
+  width: 100%;
 }
 
-.segment {
-  flex: 1;
-  background: var(--border);
-  border-radius: 1px;
-  transition: all 50ms ease-out;
-}
-
-.segment.active {
-  background: var(--segment-color);
-  box-shadow: 0 0 6px var(--segment-color);
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 </style>

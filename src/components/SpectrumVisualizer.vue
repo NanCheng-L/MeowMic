@@ -17,7 +17,7 @@ const freqPerBand = SAMPLE_RATE / 2 / BANDS // ≈ 750Hz
 // 频率标签位置（Hz）
 const freqLabels = [0, 1000, 2000, 5000, 10000, 20000]
 
-const draw = () => {
+const drawFrame = () => {
   const canvas = canvasRef.value
   if (!canvas) return
 
@@ -26,41 +26,50 @@ const draw = () => {
 
   const width = canvas.width
   const height = canvas.height
-  const labelHeight = 20 // 底部坐标区高度
+  const labelHeight = 20
   const specHeight = height - labelHeight
 
   ctx.clearRect(0, 0, width, height)
 
-  if (currentData.length === 0) {
-    // 空状态也画坐标
-    drawLabels(ctx, width, labelHeight, specHeight)
-    animationId = requestAnimationFrame(draw)
-    return
+  if (currentData.length > 0) {
+    const data = currentData
+    const barCount = data.length
+    const gap = 2
+    const barWidth = (width - (barCount - 1) * gap) / barCount
+
+    data.forEach((value, i) => {
+      const barHeight = value * specHeight
+      const x = i * (barWidth + gap)
+      const y = specHeight - barHeight
+
+      const gradient = ctx.createLinearGradient(x, specHeight, x, y)
+      gradient.addColorStop(0, '#10b981')
+      gradient.addColorStop(0.6, '#f59e0b')
+      gradient.addColorStop(1, '#ef4444')
+
+      ctx.fillStyle = gradient
+      ctx.beginPath()
+      ctx.roundRect(x, y, barWidth, barHeight, [2, 2, 0, 0])
+      ctx.fill()
+    })
   }
 
-  const data = currentData
-  const barCount = data.length
-  const gap = 2
-  const barWidth = (width - (barCount - 1) * gap) / barCount
-
-  data.forEach((value, i) => {
-    const barHeight = value * specHeight
-    const x = i * (barWidth + gap)
-    const y = specHeight - barHeight
-
-    const gradient = ctx.createLinearGradient(x, specHeight, x, y)
-    gradient.addColorStop(0, '#10b981')
-    gradient.addColorStop(0.6, '#f59e0b')
-    gradient.addColorStop(1, '#ef4444')
-
-    ctx.fillStyle = gradient
-    ctx.beginPath()
-    ctx.roundRect(x, y, barWidth, barHeight, [2, 2, 0, 0])
-    ctx.fill()
-  })
-
   drawLabels(ctx, width, labelHeight, specHeight)
-  animationId = requestAnimationFrame(draw)
+}
+
+const draw = () => {
+  drawFrame()
+  if (currentData.length > 0) {
+    animationId = requestAnimationFrame(draw)
+  } else {
+    animationId = null
+  }
+}
+
+const scheduleDraw = () => {
+  if (!animationId) {
+    animationId = requestAnimationFrame(draw)
+  }
 }
 
 function drawLabels(ctx: CanvasRenderingContext2D, width: number, _labelHeight: number, specHeight: number) {
@@ -103,13 +112,14 @@ const resize = () => {
 watch(() => props.data, (newData) => {
   if (newData && newData.length > 0) {
     currentData = newData
+    scheduleDraw()
   }
 }, { deep: true })
 
 onMounted(() => {
   resize()
   window.addEventListener('resize', resize)
-  animationId = requestAnimationFrame(draw)
+  drawFrame()
 })
 
 onUnmounted(() => {

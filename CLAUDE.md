@@ -171,6 +171,7 @@ scripts/                # 构建/发布辅助脚本
 - **爆炸模式 echo 效果**：60% 强度 = 最大效果（`mix = (intensity / 60.0).min(1.0)`），延迟 10~80ms，反馈 0~0.4，湿声增益 0~0.8。delay_buf 大小 24000 samples（500ms @ 48kHz），延迟不能超过 buf_len 否则 usize 减法下溢
 - **format_output_bytes 单声道→立体声扩展缺失**：v0.2.8 的 `format_output_bytes` 有 `upmix_to_stereo()` 先扩展再写字节，模块拆分（`5218730`）后丢失这一步，`samples.chunks(output_channels)` 把相邻 mono 样本错拆到左右声道。同时 32-bit float 路径缺少 `/32767` 归一化。症状：输出有刺啦杂音，安静时明显说话时被语音掩盖。修复：iterate mono frames × duplicate to channels，float 归一化
 - **RNNoise/Biquad denormal 浮点数累积**：RNNoise 静音帧输出极小值（~1e-30），Biquad 滤波器 `y1/y2` 状态在长时间静音后累积 denormal。经 gain/EQ 放大后产生可闻刺啦声。修复：降噪+strength mixing 后 `abs() < 1e-10` flush to zero；Biquad `y1/y2` 同理
+- **WebView2 GPU 进程占用**：Tauri 2 默认启用 GPU 硬件加速，WebView2 GPU 进程可能占用较高导致鼠标卡顿。优化手段：① `SpectrumVisualizer` 的 `requestAnimationFrame` 循环在无频谱数据时停止，避免 60fps 空转；② `AudioMeter` 从 32 个 DOM div 改为 Canvas 绘制，消除 class 切换 + CSS transition + box-shadow 的 GPU 合成开销；③ `useAudioStats` 轮询间隔从 50ms 放宽到 100ms，减少 invoke 和重绘频率
 
 ## 版本号管理
 

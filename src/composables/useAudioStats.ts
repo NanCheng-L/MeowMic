@@ -24,7 +24,7 @@ export function useAudioStats() {
 
   let pollingInterval: ReturnType<typeof setInterval> | null = null
 
-  const startPolling = (interval = 50) => {
+  const startPolling = (interval = 100) => {
     stopPolling()
     pollingInterval = setInterval(async () => {
       try {
