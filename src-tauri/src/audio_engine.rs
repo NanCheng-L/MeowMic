@@ -728,6 +728,7 @@ fn audio_loop(
         clear_input_acc: false,
         input_work_a: vec![0.0f32; 1920], // max input per read
         input_work_b: vec![0.0f32; 1920],
+        bgm_read_pos: 0,
     };
 
     let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];

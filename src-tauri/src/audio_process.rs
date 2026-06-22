@@ -41,6 +41,8 @@ pub struct FrameState {
     /// process_input 预分配工作 buffer
     pub input_work_a: Vec<f32>,
     pub input_work_b: Vec<f32>,
+    /// BGM 缓冲区读位置（避免 drain 的 O(n) memmove）
+    pub bgm_read_pos: usize,
 }
 
 /// 帧处理共享依赖（只读引用）
@@ -434,16 +436,26 @@ pub fn process_frame(
             }
         }
 
-        let max_bgm = deps.frame_size * 10;
+        // 溢出保护：已消费部分超过 buffer 一半时 compact（低频 O(n)）
+        let consumed = state.bgm_read_pos;
+        if consumed > state.bgm_buf.len() / 2 && consumed > 0 {
+            state.bgm_buf.drain(..consumed);
+            state.bgm_read_pos = 0;
+        }
+        // 硬上限：BGM 数据堆积过多时丢弃最旧的数据
+        let max_bgm = deps.frame_size * 20;
         if state.bgm_buf.len() > max_bgm {
-            state.bgm_buf.drain(..state.bgm_buf.len() - max_bgm);
+            let excess = state.bgm_buf.len() - max_bgm;
+            state.bgm_buf.drain(..excess);
+            state.bgm_read_pos = state.bgm_read_pos.saturating_sub(excess);
         }
 
         let bgm_gain_bits = deps.bgm_gain.load(Ordering::Relaxed);
         let bgm_gain_val = f32::from_bits(bgm_gain_bits).max(0.0).min(2.0);
 
+        let needed = deps.frame_size * 2;
         for i in 0..deps.frame_size {
-            let bgm_idx = i * 2;
+            let bgm_idx = state.bgm_read_pos + i * 2;
             let bgm_l = if bgm_idx < state.bgm_buf.len() {
                 state.bgm_buf[bgm_idx] as f32
             } else {
@@ -458,12 +470,12 @@ pub fn process_frame(
             state.work_buf_b[i] = state.work_buf_a[i] + bgm_mono * bgm_gain_val;
         }
 
-        // 消费已使用的 BGM 样本
-        let used = deps.frame_size * 2;
-        if used <= state.bgm_buf.len() {
-            state.bgm_buf.drain(..used);
-        } else {
+        // 推进读位置
+        state.bgm_read_pos += needed;
+        // 全部消费完时 reset
+        if state.bgm_read_pos >= state.bgm_buf.len() {
             state.bgm_buf.clear();
+            state.bgm_read_pos = 0;
         }
     } else {
         // 无 BGM：work_buf_a → work_buf_b
