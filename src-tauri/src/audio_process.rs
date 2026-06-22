@@ -3,7 +3,7 @@
 /// 包含降噪、增益、EQ、爆炸模式、BGM 混音、Soft limiter 等处理函数。
 
 use crate::audio_engine::DenoiseConfig;
-use crate::audio_utils::{calculate_rms, compute_spectrum, resample_in_place, write_to_monitor};
+use crate::audio_utils::{calculate_rms, compute_spectrum_into, resample_in_place, write_to_monitor};
 use crate::debug::debug_log;
 use crate::denoise::{self, FRAME_SIZE};
 use crate::eq::{EqConfig, EqProcessor};
@@ -43,6 +43,8 @@ pub struct FrameState {
     pub input_work_b: Vec<f32>,
     /// BGM 缓冲区读位置（避免 drain 的 O(n) memmove）
     pub bgm_read_pos: usize,
+    /// 频谱计算预分配 buffer（避免每 5 帧堆分配）
+    pub spectrum_buf: [f32; 32],
 }
 
 /// 帧处理共享依赖（只读引用）
@@ -214,34 +216,26 @@ pub fn process_frame(
     state: &mut FrameState,
     deps: &FrameDeps,
 ) -> usize {
-    let frame_start = std::time::Instant::now();
-
     let mut input_frame = [0.0f32; 480];
     let len = chunk.len().min(deps.frame_size);
     input_frame[..len].copy_from_slice(&chunk[..len]);
 
     let mut output_frame = input_frame;
     if current_config.enabled {
-        let denoise_start = std::time::Instant::now();
         state.denoise.process_frame(&mut output_frame, &input_frame);
-        let denoise_ms = denoise_start.elapsed().as_micros() as f32 / 1000.0;
-        if denoise_ms > 8.0 {
-            debug_log(&format!(
-                "SLOW denoise: {:.1}ms frame={}",
-                denoise_ms, state.frame_count
-            ));
-        }
 
-        // 防止 denoise 模型输出 NaN/Inf 穿透链路
-        for s in output_frame.iter_mut() {
-            if !s.is_finite() {
-                *s = 0.0;
+        // NaN 检查 + input/output peak 检测（融合为一遍遍历）
+        let mut input_peak = 0.0f32;
+        let mut output_peak = 0.0f32;
+        for (out, &inp) in output_frame.iter_mut().zip(input_frame.iter()) {
+            if !out.is_finite() {
+                *out = 0.0;
             }
+            input_peak = input_peak.max(inp.abs());
+            output_peak = output_peak.max(out.abs());
         }
 
         // 检测模型是否被回声打废：输入能量异常高（回声反馈）但降噪输出全零
-        let input_peak = input_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        let output_peak = output_frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         if input_peak > 1000.0 && output_peak < 1.0 {
             state.consecutive_zero_output += 1;
             if state.consecutive_zero_output >= 10 {
@@ -341,19 +335,16 @@ pub fn process_frame(
         );
     }
 
-    // ====== 增益（原地写入 work_buf_a）======
+    // ====== 增益（原地写入 work_buf_a，pre/post peak 融合为一遍遍历）======
     let mic_gain = current_config.mic_gain;
-    let pre_gain_peak = output_frame
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max);
+    let mut pre_gain_peak = 0.0f32;
+    let mut post_gain_peak = 0.0f32;
     for (i, &s) in output_frame.iter().enumerate() {
-        state.work_buf_a[i] = s * mic_gain;
+        pre_gain_peak = pre_gain_peak.max(s.abs());
+        let val = s * mic_gain;
+        state.work_buf_a[i] = val;
+        post_gain_peak = post_gain_peak.max(val.abs());
     }
-    let post_gain_peak = state.work_buf_a[..deps.frame_size]
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max);
 
     // 监听点 3=增益后
     if monitor_wants && current_monitor_point == 3 {
@@ -385,23 +376,25 @@ pub fn process_frame(
         }
     }
     let current_eq = state.last_eq_config.clone().unwrap_or_default();
-    // EQ 处理：work_buf_a → work_buf_b（如果开启），否则直接引用 work_buf_a
-    if current_eq.enabled {
+    let post_eq_peak = if current_eq.enabled {
         state.work_buf_b[..deps.frame_size].copy_from_slice(&state.work_buf_a[..deps.frame_size]);
         state.eq_processor.process_frame(&mut state.work_buf_b[..deps.frame_size]);
-        // NaN/Inf 检查
+        // NaN/Inf 检查 + post_eq_peak（融合为一遍）
+        let mut post_eq_local = 0.0f32;
         for s in state.work_buf_b[..deps.frame_size].iter_mut() {
             if !s.is_finite() {
                 *s = 0.0;
             }
+            post_eq_local = post_eq_local.max(s.abs());
         }
+        post_eq_local
     } else {
         state.work_buf_b[..deps.frame_size].copy_from_slice(&state.work_buf_a[..deps.frame_size]);
-    }
-    let post_eq_peak = state.work_buf_b[..deps.frame_size]
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max);
+        state.work_buf_b[..deps.frame_size]
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0f32, f32::max)
+    };
 
     // 监听点 4=EQ 后
     if monitor_wants && current_monitor_point == 4 {
@@ -498,8 +491,10 @@ pub fn process_frame(
         .map(|s| s.abs())
         .fold(0.0f32, f32::max);
 
-    // ============ Soft limiter（work_buf_b 原地处理）============
+    // ============ Soft limiter + output_peak（融合为一遍）============
+    let output_peak;
     if !deps.explode_state.enabled.load(Ordering::Relaxed) {
+        let mut peak = 0.0f32;
         for sample in state.work_buf_b[..deps.frame_size].iter_mut() {
             if !sample.is_finite() {
                 *sample = 0.0;
@@ -512,20 +507,19 @@ pub fn process_frame(
                 let sign = if *sample > 0.0 { 1.0 } else { -1.0 };
                 *sample = sign * compressed.min(30000.0);
             }
+            peak = peak.max(sample.abs());
         }
+        output_peak = peak;
     } else {
+        let mut peak = 0.0f32;
         for sample in state.work_buf_b[..deps.frame_size].iter_mut() {
             if !sample.is_finite() {
                 *sample = 0.0;
             }
+            peak = peak.max(sample.abs());
         }
+        output_peak = peak;
     }
-
-    // ====== 诊断：limiter 后峰值 ======
-    let output_peak = state.work_buf_b[..deps.frame_size]
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max);
 
     // 监听点 5=最终输出（limiter 后）
     if monitor_wants && current_monitor_point == 5 {
@@ -562,15 +556,6 @@ pub fn process_frame(
     );
 
     state.frame_count += 1;
-
-    // 帧处理总耗时
-    let frame_ms = frame_start.elapsed().as_micros() as f32 / 1000.0;
-    if frame_ms > 10.0 {
-        debug_log(&format!(
-            "SLOW frame: {:.1}ms frame={}",
-            frame_ms, state.frame_count
-        ));
-    }
 
     // ====== 诊断日志 ======
     log_diagnostics(
@@ -634,7 +619,8 @@ pub fn process_frame(
         current_stats.noise_reduction_db = input_level_db - output_level_db;
         current_stats.latency_ms = input_latency + output_latency;
         current_stats.frames_processed = state.frame_count;
-        current_stats.spectrum = compute_spectrum(&input_frame, 32);
+        compute_spectrum_into(&input_frame, &mut state.spectrum_buf);
+        current_stats.spectrum = state.spectrum_buf.to_vec();
     }
 
     out_bytes

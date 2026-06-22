@@ -8,34 +8,30 @@ pub fn calculate_rms(samples: &[f32]) -> f32 {
     (sum / samples.len() as f32).sqrt()
 }
 
-pub fn compute_spectrum(samples: &[f32], bands: usize) -> Vec<f32> {
+/// 计算频谱能量分布（写入预分配 buffer，避免堆分配）
+pub fn compute_spectrum_into(samples: &[f32], output: &mut [f32]) {
     let n = samples.len();
+    let bands = output.len();
     if n == 0 {
-        return vec![0.0; bands];
+        output.fill(0.0);
+        return;
     }
 
-    let mut spectrum = vec![0.0f32; bands];
     let band_size = n / bands;
-
     for i in 0..bands {
         let start = i * band_size;
         let end = (start + band_size).min(n);
         if start >= n {
-            break;
+            output[i] = 0.0;
+            continue;
         }
-        let band_samples = &samples[start..end];
-        let rms = calculate_rms(band_samples);
-        spectrum[i] = rms / 32768.0;
-    }
-
-    for val in spectrum.iter_mut() {
-        if *val > 0.001 {
-            *val = (val.log10() + 3.0) / 3.0;
+        let rms = calculate_rms(&samples[start..end]);
+        let mut val = rms / 32768.0;
+        if val > 0.001 {
+            val = (val.log10() + 3.0) / 3.0;
         }
-        *val = val.clamp(0.0, 1.0);
+        output[i] = val.clamp(0.0, 1.0);
     }
-
-    spectrum
 }
 
 /// 将 f32 样本写入监听设备（非阻塞，使用预分配的 monitor_buffer）

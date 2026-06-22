@@ -1,14 +1,49 @@
+use std::io::{BufWriter, Write};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// 日志行计数器，避免每次都读文件检查轮转
+static LOG_LINE_COUNT: AtomicU32 = AtomicU32::new(0);
+/// 缓存的日志文件句柄（避免每次打开/关闭文件）
+static LOG_FILE: Mutex<Option<BufWriter<std::fs::File>>> = Mutex::new(None);
+/// 音频引擎启动时间（用于日志中的相对时间戳）
+static START_ELAPSED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 /// 写入调试日志到文件（打包后可用）
+/// 热路径安全：只写 BufWriter 内存缓冲区，不 flush 磁盘；轮转移到 stop 时
 pub fn debug_log(msg: &str) {
-    use std::io::Write;
-    let log_path = std::env::temp_dir().join("meowmic-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-        let elapsed = std::time::Instant::now().elapsed();
-        let now = chrono::Local::now().format("%H:%M:%S%.3f");
-        let _ = writeln!(f, "[{}] {:?} | {}", now, elapsed, msg);
+    let start = START_ELAPSED.get_or_init(|| std::time::Instant::now());
+    let elapsed_ms = start.elapsed().as_millis();
+    let line = format!("[{:>8}ms] {}\n", elapsed_ms, msg);
+
+    let mut guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let log_path = std::env::temp_dir().join("meowmic-debug.log");
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            *guard = Some(BufWriter::new(f));
+        }
     }
-    // 日志轮转：超过 2000 行时只保留最近 1000 行
-    trim_log_file(&log_path, 2000, 1000);
+    if let Some(ref mut writer) = *guard {
+        // 不显式 flush —— BufWriter 内部 8KB 缓冲区满了自动写盘，单次 ~8KB 写入很快
+        let _ = writer.write_all(line.as_bytes());
+    }
+
+    LOG_LINE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 引擎停止时调用：flush 剩余日志 + 按需轮转文件
+pub fn flush_debug_log() {
+    let mut guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut writer) = *guard {
+        let _ = writer.flush();
+    }
+    // 释放句柄后再轮转
+    *guard = None;
+    let log_path = std::env::temp_dir().join("meowmic-debug.log");
+    let count = LOG_LINE_COUNT.load(Ordering::Relaxed);
+    if count > 2000 {
+        trim_log_file(&log_path, 2000, 1000);
+    }
 }
 
 /// 日志文件轮转：当行数超过 max_lines 时，只保留最后 keep_lines 行

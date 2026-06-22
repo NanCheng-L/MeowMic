@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use wasapi::*;
-pub use crate::debug::debug_log;
+pub use crate::debug::{debug_log, flush_debug_log};
 use crate::device::find_device;
 pub use crate::audio_utils::{bytes_to_f32_samples_into, downmix_to_mono_into, resample_in_place};
 pub use crate::bgm::list_audio_processes;
@@ -488,12 +488,14 @@ fn output_thread(
     }
 
     debug_log("output_thread: started");
-    let mut output_buf: Vec<u8> = Vec::new();
+    let mut output_buf: Vec<u8> = Vec::with_capacity(frame_size * output_bytes_per_frame * 8);
     let mut read_pos: usize = 0;
     let mut write_ok_count: u32 = 0;
     let mut write_err_count: u32 = 0;
     let mut stats_start = std::time::Instant::now();
     let frame_bytes = frame_size * output_bytes_per_frame;
+    // 预分配静音 buffer，避免 valid_len==0 时每帧堆分配
+    let silence_buf = vec![0u8; frame_bytes];
 
     while running.load(Ordering::Acquire) {
         // 1. 收集所有可用数据
@@ -522,8 +524,8 @@ fn output_thread(
         if valid_len == 0 {
             // 缓冲区空：写静音保持流连续，避免欠载卡顿
             let frames_to_write = frame_size.min(available);
-            let silence = vec![0u8; frames_to_write * output_bytes_per_frame];
-            if res.render.write_to_device(frames_to_write, &silence, None).is_ok() {
+            let silence_bytes = frames_to_write * output_bytes_per_frame;
+            if res.render.write_to_device(frames_to_write, &silence_buf[..silence_bytes], None).is_ok() {
                 write_ok_count += 1;
             }
             continue;
@@ -542,6 +544,11 @@ fn output_thread(
                         output_buf.clear();
                         read_pos = 0;
                     }
+                    // 消费超过一半时 compact 一次（低频 O(n)，其余帧 O(1) 只推进 read_pos）
+                    if read_pos > output_buf.len() / 2 && read_pos > 0 {
+                        output_buf.drain(..read_pos);
+                        read_pos = 0;
+                    }
                 }
                 Err(e) => {
                     write_err_count += 1;
@@ -550,13 +557,12 @@ fn output_thread(
             }
         }
 
-        // 6. 溢出保护：缓冲区过大时丢弃旧数据
+        // 6. 溢出保护：pending 数据过多时只移 read_pos，不移动内存
         let max_buf = frame_bytes * 20;
-        if output_buf.len() > max_buf {
-            let drain = output_buf.len() - max_buf;
-            output_buf.drain(..drain);
-            read_pos = read_pos.saturating_sub(drain);
-            debug_log(&format!("output_thread: dropped {} bytes (overflow), buf={}bytes", drain, output_buf.len()));
+        if output_buf.len() - read_pos > max_buf {
+            let excess = output_buf.len() - read_pos - max_buf;
+            read_pos += excess;
+            debug_log(&format!("output_thread: skipped {} bytes (overflow), pending={}bytes", excess, output_buf.len() - read_pos));
         }
 
         // 7. 每 5 秒输出一次统计
@@ -729,10 +735,11 @@ fn audio_loop(
         input_work_a: vec![0.0f32; 1920], // max input per read
         input_work_b: vec![0.0f32; 1920],
         bgm_read_pos: 0,
+        spectrum_buf: [0.0f32; 32],
     };
 
     let mut input_buffer = vec![0u8; frame_size * input_bytes_per_frame];
-    let mut input_acc: Vec<f32> = Vec::new();
+    let mut input_acc: Vec<f32> = Vec::with_capacity(frame_size * 4);
     // 输出 buffer 池：轮换使用，避免每帧 .to_vec() 堆分配
     let mut output_buf_pool: Vec<Vec<u8>> = (0..4).map(|_| vec![0u8; max_output_frames * output_bytes_per_frame]).collect();
     let mut output_buf_idx: usize = 0;
@@ -809,15 +816,7 @@ fn audio_loop(
         }
 
         loop_iteration += 1;
-        let current_config = {
-            let cfg_start = std::time::Instant::now();
-            let cfg = config.read().clone();
-            let cfg_ms = cfg_start.elapsed().as_micros() as f32 / 1000.0;
-            if cfg_ms > 2.0 {
-                debug_log(&format!("SLOW config.read: {:.1}ms iter={}", cfg_ms, loop_iteration));
-            }
-            cfg
-        };
+        let current_config = config.read().clone();
 
         // DeepFilterNet: strength 变化时更新内部降噪强度
         if (current_config.strength - last_strength).abs() > f32::EPSILON {
@@ -926,6 +925,9 @@ fn audio_loop(
     drop(output_tx);
     // 等待输出线程退出
     let _ = output_handle.join();
+
+    // Flush 调试日志 + 轮转（不在热路径做，避免磁盘 I/O 尖刺）
+    flush_debug_log();
 
     Ok(())
 }
