@@ -8,7 +8,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/NanCheng-L/MeowMic)](https://github.com/NanCheng-L/MeowMic/releases/latest)
 
-👉 [**点击下载最新版本**](https://github.com/NanCheng-L/MeowMic/releases/latest)
+👉 **[点击下载最新版本](https://github.com/NanCheng-L/MeowMic/releases/latest)**
 
 > 进入下载页面后，找到 `.exe` 后缀的文件（如 `MeowMic_0.2.3_x64-setup.exe`），点击下载并双击运行安装。
 
@@ -18,7 +18,6 @@
     <td><img width="380" alt="41e71233-b375-4440-ae58-29a64a9b0c6d" src="https://github.com/user-attachments/assets/4a282f7c-2960-4c34-beac-a7435b7262b8" /></td>
   </tr>
 </table>
-
 
 ## 功能
 
@@ -48,34 +47,34 @@
 
 ### 前端组件
 
-| 组件 | 说明 | 窗口 |
-|------|------|------|
-| DeviceSelector | 设备选择 | 主窗口 |
-| DenoiseControl | 降噪控制（开关+强度+预设） | 主窗口 |
-| BgmMixer | BGM 混音（按进程捕获） | 主窗口 |
-| EqControl | 均衡器开关按钮 | 主窗口 |
-| ExplodeButton | 一键炸麦 | 主窗口 |
-| AudioMeter | 电平表 + 频谱可视化 | 主窗口 |
-| EqPage | 均衡器界面（Canvas 曲线图） | 独立窗口 |
-| SettingsPage | 设置界面 | 独立窗口 |
-| TutorialPage | 使用教程 | 独立窗口 |
+| 组件             | 说明                | 窗口   |
+| -------------- | ----------------- | ---- |
+| DeviceSelector | 设备选择              | 主窗口  |
+| DenoiseControl | 降噪控制（开关+强度+预设）    | 主窗口  |
+| BgmMixer       | BGM 混音（按进程捕获）     | 主窗口  |
+| EqControl      | 均衡器开关按钮           | 主窗口  |
+| ExplodeButton  | 一键炸麦              | 主窗口  |
+| AudioMeter     | 电平表 + 频谱可视化       | 主窗口  |
+| EqPage         | 均衡器界面（Canvas 曲线图） | 独立窗口 |
+| SettingsPage   | 设置界面              | 独立窗口 |
+| TutorialPage   | 使用教程              | 独立窗口 |
 
 ### 后端模块
 
-| 模块 | 说明 |
-|------|------|
-| audio_engine.rs | WASAPI 音频引擎（三线程架构：处理线程 + 输出线程） |
-| audio_init.rs | 音频设备初始化（输入/输出/监听 WASAPI 客户端配置） |
-| audio_process.rs | 帧处理管线（降噪→增益→EQ→爆炸→BGM混音→软限制） |
-| audio_utils.rs | 音频工具（格式转换、重采样、mono↔多声道、监听写入） |
-| bgm.rs | BGM 进程捕获（WASAPI Process Loopback） |
-| debug.rs | 调试日志（BufWriter 缓存写入 %TEMP%\meowmic-debug.log） |
-| device.rs | 设备查找（find_device） |
-| device_watcher.rs | 设备热拔插检测（后台轮询 + Tauri 事件） |
-| denoise/ | 降噪模型（RNNoise 原生 / DeepFilterNet3 FFI） |
-| eq.rs | EQ 均衡器（10 段 Biquad IIR Peaking EQ + 预设） |
-| explode.rs | 爆炸模式（7 种效果：方波/电流/破音/白噪/机器人/恶魔/回音） |
-| lib.rs | Tauri 命令注册 + 系统托盘 + 设置管理 |
+| 模块                 | 说明                                            |
+| ------------------ | --------------------------------------------- |
+| audio\_engine.rs   | WASAPI 音频引擎（三线程架构：处理线程 + 输出线程）                |
+| audio\_init.rs     | 音频设备初始化（输入/输出/监听 WASAPI 客户端配置）                |
+| audio\_process.rs  | 帧处理管线（降噪→增益→EQ→爆炸→BGM混音→软限制）                  |
+| audio\_utils.rs    | 音频工具（格式转换、重采样、mono↔多声道、监听写入）                  |
+| bgm.rs             | BGM 进程捕获（WASAPI Process Loopback）             |
+| debug.rs           | 调试日志（BufWriter 缓存写入 %TEMP%\meowmic-debug.log） |
+| device.rs          | 设备查找（find\_device）                            |
+| device\_watcher.rs | 设备热拔插检测（后台轮询 + Tauri 事件）                      |
+| denoise/           | 降噪模型（RNNoise 原生 / DeepFilterNet3 FFI）         |
+| eq.rs              | EQ 均衡器（10 段 Biquad IIR Peaking EQ + 预设）       |
+| explode.rs         | 爆炸模式（7 种效果：方波/电流/破音/白噪/机器人/恶魔/回音）             |
+| lib.rs             | Tauri 命令注册 + 系统托盘 + 设置管理                      |
 
 ### 降噪架构
 
@@ -137,25 +136,25 @@
 
 ## 兼容性
 
-| 项目 | 说明 |
-|------|------|
-| 操作系统 | Windows 10 (1809+) / Windows 11 |
-| 架构 | x64（ARM64 需自行编译） |
-| 音频 API | WASAPI Shared 模式 |
+| 项目     | 说明                                                              |
+| ------ | --------------------------------------------------------------- |
+| 操作系统   | Windows 10 (1809+) / Windows 11                                 |
+| 架构     | x64（ARM64 需自行编译）                                                |
+| 音频 API | WASAPI Shared 模式                                                |
 | 虚拟音频设备 | [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)（免费，需单独安装） |
-| 已知限制 | 不支持 macOS / Linux（依赖 Windows WASAPI） |
-| 已知限制 | 部分 USB 声卡在 WASAPI Shared 模式下延迟较高 |
+| 已知限制   | 不支持 macOS / Linux（依赖 Windows WASAPI）                            |
+| 已知限制   | 部分 USB 声卡在 WASAPI Shared 模式下延迟较高                                |
 
 ### 音频格式支持
 
-| 格式 | 输入解析 | 输出写入 |
-|------|----------|----------|
-| 8-bit Integer | ✅ | ✅ |
-| 16-bit Integer | ✅ | ✅ |
-| 24-bit Integer | ✅ | ✅ |
-| 32-bit Integer | ✅ | ✅ |
-| 32-bit Float | ✅ | ✅ |
-| 64-bit Float | ✅ | ✅ |
+| 格式             | 输入解析 | 输出写入 |
+| -------------- | ---- | ---- |
+| 8-bit Integer  | ✅    | ✅    |
+| 16-bit Integer | ✅    | ✅    |
+| 24-bit Integer | ✅    | ✅    |
+| 32-bit Integer | ✅    | ✅    |
+| 32-bit Float   | ✅    | ✅    |
+| 64-bit Float   | ✅    | ✅    |
 
 ### 采样率处理
 
@@ -252,3 +251,4 @@ docs/                   # 文档
 - 一键炸麦功能仅供娱乐，请勿长时间使用，以免损伤听力或设备
 - VB-Audio Virtual Cable 为第三方软件，其使用遵循其自身的许可协议
 - 本软件不收集任何用户数据，音频处理完全在本地完成
+
