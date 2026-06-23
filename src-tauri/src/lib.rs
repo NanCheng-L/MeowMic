@@ -523,9 +523,21 @@ pub fn run() {
                 }
             }
 
-            let show = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
-            let hide = MenuItemBuilder::with_id("hide", "隐藏窗口").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+            // 提前读取语言设置，用于托盘菜单
+            let tray_lang = app.store("settings.json").ok()
+                .and_then(|store| store.get("settings"))
+                .and_then(|v| serde_json::from_value::<AppSettings>(v.clone()).ok())
+                .map(|s| s.language)
+                .unwrap_or_else(|| "zh-CN".into());
+            let (tray_show, tray_hide, tray_quit) = if tray_lang == "en" {
+                ("Show Window".to_string(), "Hide Window".to_string(), "Quit".to_string())
+            } else {
+                ("显示窗口".to_string(), "隐藏窗口".to_string(), "退出".to_string())
+            };
+
+            let show = MenuItemBuilder::with_id("show", &tray_show).build(app)?;
+            let hide = MenuItemBuilder::with_id("hide", &tray_hide).build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", &tray_quit).build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&show)

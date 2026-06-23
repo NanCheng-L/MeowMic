@@ -77,6 +77,8 @@ impl Biquad {
             return 0.0;
         }
         // Denormal flush: 静音帧时内部状态可能累积极小值，产生刺啦声
+        if self.x1.abs() < 1e-10 { self.x1 = 0.0; }
+        if self.x2.abs() < 1e-10 { self.x2 = 0.0; }
         if self.y1.abs() < 1e-10 { self.y1 = 0.0; }
         if self.y2.abs() < 1e-10 { self.y2 = 0.0; }
         output
