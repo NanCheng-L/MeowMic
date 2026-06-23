@@ -476,7 +476,14 @@ pub fn process_frame(
         let bgm_gain_val = f32::from_bits(bgm_gain_bits).max(0.0).min(2.0);
 
         let needed = deps.frame_size * 2;
-        for i in 0..deps.frame_size {
+
+        // 数据不足时只消费可用部分，避免 bgm_read_pos 越界
+        let available_from_pos = state.bgm_buf.len().saturating_sub(state.bgm_read_pos);
+        let actual_needed = needed.min(available_from_pos);
+        // 实际读取位置按 i16 样本数计算（不是字节数）
+        let actual_samples = actual_needed / 2;
+
+        for i in 0..actual_samples {
             let bgm_idx = state.bgm_read_pos + i * 2;
             let bgm_l = if bgm_idx < state.bgm_buf.len() {
                 state.bgm_buf[bgm_idx] as f32
@@ -491,9 +498,13 @@ pub fn process_frame(
             let bgm_mono = (bgm_l + bgm_r) / 2.0;
             state.work_buf_b[i] = state.work_buf_a[i] + bgm_mono * bgm_gain_val;
         }
+        // 不足的部分保持 work_buf_a 的值（无 BGM 混入）
+        for i in actual_samples..deps.frame_size {
+            state.work_buf_b[i] = state.work_buf_a[i];
+        }
 
         // 推进读位置
-        state.bgm_read_pos += needed;
+        state.bgm_read_pos += actual_needed;
         // 全部消费完时 reset
         if state.bgm_read_pos >= state.bgm_buf.len() {
             state.bgm_buf.clear();

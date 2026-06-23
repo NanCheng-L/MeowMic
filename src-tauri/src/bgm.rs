@@ -553,6 +553,11 @@ pub fn bgm_process_loop(
     let frame_size = 480;
     let mut buffer = vec![0u8; frame_size * bytes_per_frame];
 
+    // 预分配 buffer 池，避免每帧堆分配（2 个轮换，channel 持有时用另一个）
+    let max_samples = frame_size * channels;
+    let mut buf_pool: Vec<Vec<i16>> = (0..2).map(|_| Vec::with_capacity(max_samples)).collect();
+    let mut buf_idx: usize = 0;
+
     log::info!("BGM process loopback started for pid={}", pid);
     debug_log(&format!("bgm_loop[{}]: stream started, entering main loop", pid));
 
@@ -586,66 +591,55 @@ pub fn bgm_process_loop(
 
                 let bytes_read = frames_read as usize * bytes_per_frame;
 
-                let samples: Vec<i16> = if is_float && bytes_per_sample == 4 {
-                    buffer[..bytes_read]
-                        .chunks_exact(4)
-                        .map(|chunk| {
-                            let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                            (val.clamp(-1.0, 1.0) * 32767.0) as i16
-                        })
-                        .collect()
+                // 从 buffer 池取一个 buffer，避免每帧堆分配
+                let mut samples = std::mem::take(&mut buf_pool[buf_idx]);
+                samples.clear();
+
+                if is_float && bytes_per_sample == 4 {
+                    for chunk in buffer[..bytes_read].chunks_exact(4) {
+                        let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        samples.push((val.clamp(-1.0, 1.0) * 32767.0) as i16);
+                    }
                 } else if bytes_per_sample == 4 {
-                    buffer[..bytes_read]
-                        .chunks_exact(4)
-                        .map(|chunk| {
-                            let val = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                            (val >> 16) as i16
-                        })
-                        .collect()
+                    for chunk in buffer[..bytes_read].chunks_exact(4) {
+                        let val = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        samples.push((val >> 16) as i16);
+                    }
                 } else if bytes_per_sample == 2 {
-                    buffer[..bytes_read]
-                        .chunks_exact(2)
-                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                        .collect()
+                    for chunk in buffer[..bytes_read].chunks_exact(2) {
+                        samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+                    }
                 } else {
-                    vec![0; frames_read as usize]
+                    samples.resize(frames_read as usize, 0);
                 };
 
-                let stereo_samples: Vec<i16> = if channels == 1 {
-                    samples
-                } else {
-                    samples
-                        .chunks(channels)
-                        .flat_map(|frame| {
-                            let l = frame.first().copied().unwrap_or(0);
-                            let r = frame.get(1).copied().unwrap_or(l);
-                            vec![l, r]
-                        })
-                        .collect()
-                };
+                // WASAPI 格式固定为 2ch stereo，samples 已经是交错立体声，直接发送
+                // （channels 始终为 2，mono 分支不会触发）
 
                 frame_count += 1;
                 if frame_count % 100 == 1 {
-                    let peak = stereo_samples.iter().map(|s| s.abs()).fold(0i16, i16::max);
-                    debug_log(&format!("bgm_loop[{}]: frame {} ok, {} samples, peak={}", pid, frame_count, stereo_samples.len(), peak));
+                    let peak = samples.iter().map(|s| s.abs()).fold(0i16, i16::max);
+                    debug_log(&format!("bgm_loop[{}]: frame {} ok, {} samples, peak={}", pid, frame_count, samples.len(), peak));
                 }
 
                 // 非阻塞发送，channel 满时短暂等待并检查退出标志
-                let send_len = stereo_samples.len();
-                let mut samples_to_send = Some(stereo_samples);
-                while let Some(samples) = samples_to_send.take() {
-                    match sender.try_send(samples) {
+                let send_len = samples.len();
+                let mut samples_to_send = Some(samples);
+                while let Some(s) = samples_to_send.take() {
+                    match sender.try_send(s) {
                         Ok(_) => {
+                            // 切换到下一个 buffer（刚发送的那个被 channel 持有）
+                            buf_idx = (buf_idx + 1) % buf_pool.len();
                             if frame_count % 100 == 1 {
                                 debug_log(&format!("bgm_loop[{}]: sent {} samples to channel", pid, send_len));
                             }
                             break;
                         }
-                        Err(crossbeam_channel::TrySendError::Full(samples)) => {
+                        Err(crossbeam_channel::TrySendError::Full(s)) => {
+                            samples_to_send = Some(s);
                             if !running.load(Ordering::Acquire) {
                                 break;
                             }
-                            samples_to_send = Some(samples);
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,

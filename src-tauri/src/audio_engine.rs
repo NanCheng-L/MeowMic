@@ -392,8 +392,8 @@ impl AudioEngine {
 
     /// 设置爆炸模式
     pub fn set_explode_mode(&self, enabled: bool) {
-        self.explode_enabled.store(enabled, Ordering::Relaxed);
-        self.explode_state.enabled.store(enabled, Ordering::Relaxed);
+        self.explode_enabled.store(enabled, Ordering::Release);
+        self.explode_state.enabled.store(enabled, Ordering::Release);
     }
 
     /// 设置爆炸强度 (1-100)，所有效果共用此滑块
@@ -549,10 +549,11 @@ fn output_thread(
 
         // 6. 溢出保护：pending 数据过多时只移 read_pos，不移动内存
         let max_buf = frame_bytes * 20;
-        if output_buf.len() - read_pos > max_buf {
-            let excess = output_buf.len() - read_pos - max_buf;
+        let pending = output_buf.len().saturating_sub(read_pos);
+        if pending > max_buf {
+            let excess = pending - max_buf;
             read_pos += excess;
-            debug_log(&format!("output_thread: skipped {} bytes (overflow), pending={}bytes", excess, output_buf.len() - read_pos));
+            debug_log(&format!("output_thread: skipped {} bytes (overflow), pending={}bytes", excess, output_buf.len().saturating_sub(read_pos)));
         }
 
         // 7. 每 5 秒输出一次统计
