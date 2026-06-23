@@ -2,6 +2,7 @@
   "name": "meowmic",
   "private": true,
   "version": "0.2.9",
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
