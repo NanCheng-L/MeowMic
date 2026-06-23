@@ -181,6 +181,38 @@ scripts/                # 构建/发布辅助脚本
 - `src-tauri/Cargo.toml` 的 `version`
 - `src-tauri/tauri.conf.json` 的 `version`（Tauri 打包使用的实际版本）
 
+## 版本公告模板
+
+用户说"整理版本公告"时，执行以下逻辑：
+
+1. 用 `git log --oneline <上一版本号对应commit>..HEAD` 获取变更列表
+2. 按 修复/新增/改进/文档 分类整理
+3. 用以下模板输出中文公告：
+
+```
+## MeowMic vX.X.X 更新公告
+
+---
+
+**🐱🎤 MeowMic vX.X.X 已发布！**
+
+<一句话概述本次更新重点>
+
+### 🔧 修复
+- <修复项>
+
+### ✨ 改进
+- <改进项>
+
+### 📜 文档
+- <文档变更>（如有）
+
+---
+
+📥 **下载**：[GitHub Releases](https://github.com/NanCheng-L/MeowMic/releases/latest)
+💬 **反馈**：[GitHub Issues](https://github.com/NanCheng-L/MeowMic/issues)
+```
+
 ## 自动更新
 
 使用 Tauri updater 插件（`tauri-plugin-updater`），通过 GitHub Releases 分发更新。
