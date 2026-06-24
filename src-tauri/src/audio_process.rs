@@ -576,8 +576,7 @@ pub fn process_frame(
         );
     }
 
-    // 高通滤波器：切除 80Hz 以下次声波能量（人耳听不到但频谱表会显示 -50dB 跳动）
-    // 一阶 IIR: y[n] = alpha * (y[n-1] + x[n] - x[n-1])，alpha ≈ 0.9895 @ 80Hz/48kHz
+    // 高通滤波器：切除 80Hz 以下次声波能量
     const HP_ALPHA: f32 = 0.98953;
     {
         let buf = &mut state.work_buf_b[..deps.frame_size];
