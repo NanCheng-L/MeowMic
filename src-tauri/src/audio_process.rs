@@ -45,6 +45,9 @@ pub struct FrameState {
     pub bgm_read_pos: usize,
     /// 频谱计算预分配 buffer（避免每 5 帧堆分配）
     pub spectrum_buf: [f32; 32],
+    /// 高通滤波器状态：切除 80Hz 以下次声波
+    pub hp_x_prev: f32,
+    pub hp_y_prev: f32,
 }
 
 /// 帧处理共享依赖（只读引用）
@@ -303,7 +306,7 @@ pub fn process_frame(
         // Denormal flush: RNNoise 在静音帧可能输出极小的非规格化浮点数，
         // 经过 gain/EQ 放大后产生刺啦声。强制 flush to zero。
         for sample in output_frame.iter_mut() {
-            if sample.abs() < 1e-10 {
+            if !sample.is_finite() || sample.abs() < 1e-10 {
                 *sample = 0.0;
             }
         }
@@ -571,6 +574,24 @@ pub fn process_frame(
             state.monitor_sample_rate,
             &mut state.monitor_resample_buf,
         );
+    }
+
+    // 高通滤波器：切除 80Hz 以下次声波能量（人耳听不到但频谱表会显示 -50dB 跳动）
+    // 一阶 IIR: y[n] = alpha * (y[n-1] + x[n] - x[n-1])，alpha ≈ 0.9895 @ 80Hz/48kHz
+    const HP_ALPHA: f32 = 0.98953;
+    {
+        let buf = &mut state.work_buf_b[..deps.frame_size];
+        let mut x_prev = state.hp_x_prev;
+        let mut y_prev = state.hp_y_prev;
+        for sample in buf.iter_mut() {
+            let x = *sample;
+            let y = HP_ALPHA * (y_prev + x - x_prev);
+            *sample = y;
+            x_prev = x;
+            y_prev = y;
+        }
+        state.hp_x_prev = x_prev;
+        state.hp_y_prev = y_prev;
     }
 
     // 重采样回设备采样率 + 单声道→多声道 + f32→字节
