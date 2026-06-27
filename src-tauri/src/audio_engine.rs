@@ -518,7 +518,7 @@ fn output_thread(
 
         let valid_len = output_buf.len() - read_pos;
 
-        // 5. 有数据时一次性写满可用空间
+        // 5. 写入音频数据（无数据时写静音填充，防止 WASAPI 缓冲区欠载导致卡顿）
         if valid_len > 0 {
             let frames_to_write = (valid_len / output_bytes_per_frame).min(available);
             let write_bytes = frames_to_write * output_bytes_per_frame;
@@ -527,12 +527,10 @@ fn output_thread(
                     Ok(()) => {
                         write_ok_count += 1;
                         read_pos += write_bytes;
-                        // 全部消费完 → reset
                         if read_pos == output_buf.len() {
                             output_buf.clear();
                             read_pos = 0;
                         }
-                        // 消费超过一半时 compact 一次（低频 O(n)，其余帧 O(1) 只推进 read_pos）
                         if read_pos > output_buf.len() / 2 && read_pos > 0 {
                             output_buf.drain(..read_pos);
                             read_pos = 0;
@@ -544,8 +542,14 @@ fn output_thread(
                     }
                 }
             }
+        } else {
+            // 缓冲区空：写静音填充可用空间，维持 WASAPI 时钟节奏
+            let silence_bytes = available * output_bytes_per_frame;
+            if silence_bytes > 0 && silence_bytes <= frame_bytes * 4 {
+                let silence = vec![0u8; silence_bytes];
+                let _ = res.render.write_to_device(available, &silence, None);
+            }
         }
-        // 无数据时不写任何东西（与 v0.2.8 一致）
 
         // 6. 溢出保护：pending 数据过多时只移 read_pos，不移动内存
         let max_buf = frame_bytes * 20;
@@ -802,13 +806,18 @@ fn audio_loop(
         input_sample_rate,
     };
 
+    let mut slow_frame_logged = false;
+
     while running.load(Ordering::Acquire) {
+        let iter_start = std::time::Instant::now();
+
         if input_handle.wait_for_event(100).is_err() {
             std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         }
 
         loop_iteration += 1;
+        let t0 = iter_start.elapsed().as_micros();
         let current_config = config.read().clone();
 
         // DeepFilterNet: strength 变化时更新内部降噪强度
@@ -856,13 +865,19 @@ fn audio_loop(
                 input_acc.extend_from_slice(&frame_state.resample_buf[..resampled_len]);
 
                 // 每攒够 frame_size (480) 个样本就处理一帧
+                let mut frames_processed_this_iter = 0u32;
                 while input_acc.len() - frame_state.input_read_pos >= frame_size {
                     let start = frame_state.input_read_pos;
                     let mut chunk = [0.0f32; 480];
                     chunk.copy_from_slice(&input_acc[start..start + frame_size]);
                     frame_state.input_read_pos += frame_size;
+                    let t_frame_start = std::time::Instant::now();
                     let out_bytes = process_frame(&chunk, &current_config, &mut frame_state, &deps);
-                    // 用 buffer 池轮换发送，避免每帧 .to_vec() 堆分配
+                    let frame_us = t_frame_start.elapsed().as_micros();
+                    frames_processed_this_iter += 1;
+                    if frame_us > 12000 {
+                        debug_log(&format!("SLOW FRAME: process_frame took {}us (iter {})", frame_us, loop_iteration));
+                    }
                     if out_bytes > 0 {
                         let mut buf = std::mem::take(&mut output_buf_pool[output_buf_idx]);
                         buf.clear();
@@ -873,7 +888,16 @@ fn audio_loop(
                         output_buf_idx = (output_buf_idx + 1) % output_buf_pool.len();
                     }
                 }
+                let iter_us = iter_start.elapsed().as_micros();
+                if iter_us > 15000 && !slow_frame_logged {
+                    debug_log(&format!("SLOW ITER: total={}us wait={}us frames={} iter={}",
+                        iter_us, t0, frames_processed_this_iter, loop_iteration));
+                    slow_frame_logged = true;
+                } else if iter_us <= 15000 {
+                    slow_frame_logged = false;
+                }
                 // 消费完毕，清空 acc（保留未处理的尾部）
+                let t_drain_start = std::time::Instant::now();
                 if frame_state.clear_input_acc {
                     input_acc.clear();
                     frame_state.input_read_pos = 0;
@@ -881,6 +905,10 @@ fn audio_loop(
                 } else if frame_state.input_read_pos > 0 {
                     input_acc.drain(..frame_state.input_read_pos);
                     frame_state.input_read_pos = 0;
+                }
+                let drain_us = t_drain_start.elapsed().as_micros();
+                if drain_us > 5000 {
+                    debug_log(&format!("SLOW DRAIN: {}us acc_len={} iter={}", drain_us, input_acc.len(), loop_iteration));
                 }
             }
             Err(e) => {

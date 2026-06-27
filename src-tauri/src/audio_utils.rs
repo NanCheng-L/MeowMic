@@ -51,10 +51,10 @@ pub fn write_to_monitor(
         None => return,
     };
 
-    // 非阻塞：只在 event 就绪时写入，否则丢弃本帧
+    // 等待监听设备就绪，阻塞最多 20ms（监听延迟不敏感，优先不丢帧）
     if let Some(evt) = event_opt {
-        if evt.wait_for_event(0).is_err() {
-            return; // 设备还没消费完，丢弃本帧
+        if evt.wait_for_event(20).is_err() {
+            return;
         }
     }
 

@@ -244,6 +244,9 @@ pub fn init_monitor(
                         state.event = evt.ok();
                         state.current_device_id = device_id;
                         state.sample_rate = device_sample_rate;
+                        // 按监听设备实际采样率重新分配 buffer（可能与 output_sample_rate 不同）
+                        let monitor_max_frames = frame_size * (device_sample_rate as usize / 48000 + 1);
+                        state.buffer = vec![0u8; monitor_max_frames * 2 * 2];
                     } else {
                         debug_log(&format!("Monitor: failed to get render client on '{}'", device_name));
                     }
