@@ -670,18 +670,20 @@ fn audio_loop(
         log::info!("EQ enabled with preset bands");
     }
 
-    // 5. 启动 WASAPI 流
+    // 5. 启动输入流（先不启动输出流，避免 warmup 期间输出缓冲区欠载）
     devices.input_client
         .start_stream()
         .map_err(|e| format!("Failed to start input: {}", e))?;
+
+    // 6. 预热（只预热输入流）
+    warmup_streams(&devices.input_client, &devices.input_handle, &devices.input_capture, input_bytes_per_frame, frame_size);
+
+    // 7. 预热完成后再启动输出流，确保输出线程能立即拿到数据
     devices.output_client
         .start_stream()
         .map_err(|e| format!("Failed to start output: {}", e))?;
 
-    // 6. 预热
-    warmup_streams(&devices.input_client, &devices.output_client, &devices.input_handle, &devices.input_capture, input_bytes_per_frame, frame_size);
-
-    // 7. 启动输出线程
+    // 8. 启动输出线程
     let (output_tx, output_rx) = bounded::<Vec<u8>>(10);
     let output_res = OutputResources {
         client: devices.output_client,
@@ -697,7 +699,7 @@ fn audio_loop(
         })
         .map_err(|e| format!("Failed to spawn output thread: {}", e))?;
 
-    // 8. 初始化帧处理状态
+    // 9. 初始化帧处理状态
     let max_output_ratio = (output_sample_rate as f64 / 48000.0).ceil() as usize;
     let max_output_frames = frame_size * max_output_ratio;
     let mut frame_state = FrameState {

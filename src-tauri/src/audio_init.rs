@@ -268,7 +268,6 @@ pub fn init_monitor(
 /// WASAPI 流启动预热：等待设备真正就绪
 pub fn warmup_streams(
     input_client: &AudioClient,
-    output_client: &AudioClient,
     input_handle: &wasapi::Handle,
     input_capture: &AudioCaptureClient,
     input_bytes_per_frame: usize,
@@ -316,10 +315,8 @@ pub fn warmup_streams(
             attempt + 1
         ));
         let _ = input_client.stop_stream();
-        let _ = output_client.stop_stream();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = input_client.start_stream();
-        let _ = output_client.start_stream();
     }
 
     if !warmup_ok {
