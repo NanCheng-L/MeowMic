@@ -51,9 +51,9 @@ pub fn write_to_monitor(
         None => return,
     };
 
-    // 等待监听设备就绪，阻塞最多 20ms（监听延迟不敏感，优先不丢帧）
+    // 短超时：最多等 2ms（远小于 10ms 帧预算），避免阻塞主循环导致输出丢帧
     if let Some(evt) = event_opt {
-        if evt.wait_for_event(20).is_err() {
+        if evt.wait_for_event(2).is_err() {
             return;
         }
     }

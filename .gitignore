@@ -40,3 +40,6 @@ training/
 
 # Temp files
 tmp_query*.py
+
+# API keys
+scripts/.tavily-key

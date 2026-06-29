@@ -464,11 +464,12 @@ struct OutputResources {
 }
 unsafe impl Send for OutputResources {}
 
-/// 输出线程：标准 WASAPI event-driven + 读游标
-/// 热路径：只推进 read_pos，不移动内存。缓冲区完全消费时才 clear reset。
+/// 输出线程：按 wasapi-rs 官方 playsine 示例模式
+/// start_stream → 循环(get_available → write → wait_event)
 fn output_thread(
     running: Arc<AtomicBool>,
     receiver: Receiver<Vec<u8>>,
+    return_tx: Sender<Vec<u8>>,
     res: OutputResources,
     output_bytes_per_frame: usize,
     frame_size: usize,
@@ -476,18 +477,23 @@ fn output_thread(
 ) {
     let _ = initialize_mta().ok();
 
-    // 提升输出线程到实时优先级
     #[cfg(windows)]
     unsafe {
         extern "system" {
             fn GetCurrentThread() -> isize;
             fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
         }
-        SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
+        SetThreadPriority(GetCurrentThread(), 15);
     }
 
+    // 按官方示例：先 start_stream，循环内先写再等
+    if let Err(e) = res.client.start_stream() {
+        debug_log(&format!("output_thread: start_stream failed: {:?}", e));
+        return;
+    }
     debug_log("output_thread: started");
-    let mut output_buf: Vec<u8> = Vec::with_capacity(frame_size * output_bytes_per_frame * 8);
+
+    let mut output_buf: Vec<u8> = Vec::with_capacity(frame_size * output_bytes_per_frame * 4);
     let mut read_pos: usize = 0;
     let mut write_ok_count: u32 = 0;
     let mut write_err_count: u32 = 0;
@@ -495,32 +501,30 @@ fn output_thread(
     let frame_bytes = frame_size * output_bytes_per_frame;
 
     while running.load(Ordering::Acquire) {
-        // 1. 收集所有可用数据
+        // 1. 收集 channel 中所有可用数据，归还 Vec
         while let Ok(data) = receiver.try_recv() {
             output_buf.extend_from_slice(&data);
+            let _ = return_tx.try_send(data);
         }
 
-        // 2. 等设备就绪（与 v0.2.8 一致）
-        if res.event.wait_for_event(100).is_err() {
-            continue;
-        }
-
-        // 3. 再次收集（等待期间可能有新数据到达）
-        while let Ok(data) = receiver.try_recv() {
-            output_buf.extend_from_slice(&data);
-        }
-
-        // 4. 用 get_available_space_in_frames 获取可用空间（与 v0.2.8 一致）
+        // 2. 获取可用空间（首次调用返回整个缓冲区，自然填满）
         let available = match res.client.get_available_space_in_frames() {
             Ok(n) if n > 0 => n as usize,
-            _ => continue,
+            _ => {
+                // 无可用空间，等一下再试
+                if res.event.wait_for_event(10).is_err() {
+                    continue;
+                }
+                continue;
+            }
         };
 
         let valid_len = output_buf.len() - read_pos;
+        let valid_frames = valid_len / output_bytes_per_frame;
 
-        // 5. 写入音频数据（无数据时写静音填充，防止 WASAPI 缓冲区欠载导致卡顿）
-        if valid_len > 0 {
-            let frames_to_write = (valid_len / output_bytes_per_frame).min(available);
+        // 3. 写满可用空间（有数据写数据，没数据写静音）
+        if valid_frames > 0 {
+            let frames_to_write = valid_frames.min(available);
             let write_bytes = frames_to_write * output_bytes_per_frame;
             if write_bytes > 0 {
                 match res.render.write_to_device(frames_to_write, &output_buf[read_pos..read_pos + write_bytes], None) {
@@ -530,49 +534,48 @@ fn output_thread(
                         if read_pos == output_buf.len() {
                             output_buf.clear();
                             read_pos = 0;
-                        }
-                        if read_pos > output_buf.len() / 2 && read_pos > 0 {
+                        } else if read_pos > output_buf.len() / 2 {
                             output_buf.drain(..read_pos);
                             read_pos = 0;
                         }
                     }
                     Err(e) => {
                         write_err_count += 1;
-                        log::warn!("output_thread: write error: {:?}", e);
+                        if write_err_count <= 3 {
+                            log::warn!("output_thread: write error: {:?}", e);
+                        }
                     }
                 }
             }
         } else {
-            // 缓冲区空：写静音填充可用空间，维持 WASAPI 时钟节奏
+            // 无数据：写满静音，维持 WASAPI 时钟
             let silence_bytes = available * output_bytes_per_frame;
-            if silence_bytes > 0 && silence_bytes <= frame_bytes * 4 {
-                let silence = vec![0u8; silence_bytes];
-                let _ = res.render.write_to_device(available, &silence, None);
-            }
+            let silence = vec![0u8; silence_bytes];
+            let _ = res.render.write_to_device(available, &silence, None);
         }
 
-        // 6. 溢出保护：pending 数据过多时只移 read_pos，不移动内存
+        // 4. 溢出保护
         let max_buf = frame_bytes * 20;
         let pending = output_buf.len().saturating_sub(read_pos);
         if pending > max_buf {
             let excess = pending - max_buf;
             read_pos += excess;
-            debug_log(&format!("output_thread: skipped {} bytes (overflow), pending={}bytes", excess, output_buf.len().saturating_sub(read_pos)));
+            debug_log(&format!("output_thread: skipped {} bytes (overflow)", excess));
         }
 
-        // 7. 每 5 秒输出一次统计
+        // 5. 统计
         if stats_start.elapsed().as_secs() >= 5 {
             let pending = (output_buf.len() - read_pos) / output_bytes_per_frame;
             debug_log(&format!(
-                "output_thread stats: wrote={} err={} buf={}bytes pending_frames={}",
-                write_ok_count, write_err_count, output_buf.len() - read_pos, pending,
+                "output_thread stats: wrote={} err={} pending_frames={}",
+                write_ok_count, write_err_count, pending,
             ));
             write_ok_count = 0;
             write_err_count = 0;
             stats_start = std::time::Instant::now();
         }
 
-        // 8. BGM 漂移补偿
+        // 6. BGM 漂移补偿
         let pending_frames = (output_buf.len() - read_pos) / output_bytes_per_frame;
         let skip = if pending_frames > frame_size * 2 {
             0.05
@@ -582,9 +585,11 @@ fn output_thread(
             0.0
         };
         bgm_skip_rate.store(skip.to_bits(), Ordering::Relaxed);
+
+        // 7. 等待设备消费（官方模式：写完再等）
+        let _ = res.event.wait_for_event(100);
     }
 
-    // 清理：停止 WASAPI 流
     let _ = res.client.stop_stream();
     debug_log("output_thread: exiting");
 }
@@ -682,13 +687,11 @@ fn audio_loop(
     // 6. 预热（只预热输入流）
     warmup_streams(&devices.input_client, &devices.input_handle, &devices.input_capture, input_bytes_per_frame, frame_size);
 
-    // 7. 预热完成后再启动输出流，确保输出线程能立即拿到数据
-    devices.output_client
-        .start_stream()
-        .map_err(|e| format!("Failed to start output: {}", e))?;
+    // 7. 不在这里启动输出流，由输出线程预填充后再启动
 
     // 8. 启动输出线程
     let (output_tx, output_rx) = bounded::<Vec<u8>>(10);
+    let (return_tx, return_rx) = bounded::<Vec<u8>>(4);
     let output_res = OutputResources {
         client: devices.output_client,
         render: devices.output_render,
@@ -699,7 +702,7 @@ fn audio_loop(
     let output_handle = std::thread::Builder::new()
         .name("audio-output".into())
         .spawn(move || {
-            output_thread(running_out, output_rx, output_res, output_bytes_per_frame, frame_size, bgm_skip_rate_out);
+            output_thread(running_out, output_rx, return_tx, output_res, output_bytes_per_frame, frame_size, bgm_skip_rate_out);
         })
         .map_err(|e| format!("Failed to spawn output thread: {}", e))?;
 
@@ -879,7 +882,7 @@ fn audio_loop(
                         debug_log(&format!("SLOW FRAME: process_frame took {}us (iter {})", frame_us, loop_iteration));
                     }
                     if out_bytes > 0 {
-                        let mut buf = std::mem::take(&mut output_buf_pool[output_buf_idx]);
+                        let mut buf = return_rx.try_recv().unwrap_or_else(|_| std::mem::take(&mut output_buf_pool[output_buf_idx]));
                         buf.clear();
                         buf.extend_from_slice(&frame_state.output_buffer[..out_bytes]);
                         if output_tx.try_send(buf).is_err() && frame_state.frame_count % 2400 == 0 {

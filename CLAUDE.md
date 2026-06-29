@@ -29,8 +29,9 @@
   │ crossbeam bounded(10) channel
   ▼
 输出线程 (独立线程，THREAD_PRIORITY_TIME_CRITICAL)
-  │ WASAPI output event → try_recv → write_to_device
-  │ 丢弃溢出数据，超时写静音
+  │ get_available_space → write_to_device → wait_event（按 wasapi-rs 官方 playsine 示例）
+  │ crossbeam bounded(10) channel + return channel（Vec 回收）
+  │ 无数据时写满静音，溢出时丢弃
 ```
 
 - **输出线程**独立驱动 WASAPI 时钟，不受处理延迟影响
@@ -79,6 +80,7 @@ docs/                   # 文档
 scripts/                # 构建/发布辅助脚本
   generate-update-json.cjs # 生成更新所需的 latest.json（输出到安装包同目录，自动读取 .sig）
   set-signing-env.ps1      # 设置签名环境变量（构建前运行）
+  tavily.cjs               # Tavily API 搜索/提取/爬虫工具（key 在 .tavily-key，已 gitignore）
 ```
 
 ## 踩坑警示
@@ -149,7 +151,7 @@ scripts/                # 构建/发布辅助脚本
 - **系统声音输出不能选 VB-Cable**：安装 VB-Cable 后系统默认输出会变为 CABLE Input，用户需手动改回耳机/扬声器，否则听不到系统声音。教程页面需明确说明
 - **WASAPI 输出缓冲区溢出**：`output_buffer` 按 `frame_size * output_bytes_per_frame` 分配，但重采样后 `out_frames` 可能膨胀（如输出设备 96kHz 时翻倍）。必须按 `frame_size * (output_sample_rate / 48000).ceil()` 分配最大可能的缓冲区大小
 - **WASAPI 输出 padding 跳帧**：当缓冲区 > 20ms 时跳过写入会导致可听到的卡顿。应始终写入，让 WASAPI 处理背压。跳过帧 = 音频间隙 = 卡麦
-- **WASAPI 输出线程 recv_timeout 阻塞**：`output_thread` 中 `receiver.recv_timeout(1s)` 超时后直接 `continue` 会跳过写入，导致缓冲区欠载产生音频断续。必须用 `try_recv` 非阻塞接收，只要有缓冲数据就立即写入
+- **WASAPI 输出线程循环顺序**：必须按 wasapi-rs 官方 `playsine` 示例的顺序：`get_available_space → write_to_device → wait_event`。不能先 `wait_event` 再写——空缓冲区时事件不会触发，导致死锁。首次 `get_available_space` 返回整个缓冲区大小，自然填满，不需要预填充
 - **EQ 后缺少 NaN/Inf 检查**：Biquad IIR 滤波器在极端参数下可能输出 NaN/Inf，穿透 BGM 混音污染输出。必须在 EQ 处理后添加 `is_finite()` 检查
 - **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>1000）但降噪输出全零（<1）连续 10 帧时，重建模型并清除 `saved_model_states`。阈值不能太低（如 >100/3 帧），正常键盘鼠标声被正确降噪时会被误判为模型损坏
 - **Tauri 托盘左键点击**：`TrayIconBuilder` 默认左键也会弹右键菜单。用 `.show_menu_on_left_click(false)` 禁止左键弹菜单，配合 `.on_tray_icon_event` 处理左键单击打开主窗口
@@ -168,6 +170,7 @@ scripts/                # 构建/发布辅助脚本
 - **nnnoiseless 输入范围**：RNNoise 期望 i16 范围 [-32768, 32767]，内部静音阈值按此校准。归一化到 [-1, 1] 会导致所有帧被判定为静音直接跳过，完全丧失降噪能力
 - **爆炸模式 dual-flag**：`explode_enabled`（AudioEngine 控制是否调用 `process_explode_into`）和 `explode_state.enabled`（ExplodeState 内部控制是否实际处理）是两个独立 flag。`set_explode_mode()` 必须同时同步两者，否则爆炸效果被跳过但调用链正常执行，表现为"开关打开了但没效果"
 - **音频热路径禁止堆分配**：音频线程 48kHz 每秒处理 50 帧，任何 `Vec::new()` / `.collect()` / `.to_vec()` / `.clone()` 都会在帧间产生堆分配，饿死 WASAPI 回调导致整个音频冻结（频谱也停止）。所有效果函数必须写入预分配的 output buffer（`process_explode_into` 的 `output: &mut [f32]`），`process_input` 必须用 `_into` 版本的工具函数写入预分配 buffer，输出 channel 发送用 buffer 池轮换而非 `.to_vec()`
+- **音频热路径禁止阻塞等待**：`write_to_monitor` 中的 `event.wait_for_event(2)` 最多阻塞 2ms（远小于 10ms 帧预算），避免监听写入拖慢主循环导致输出丢帧。原 `wait_for_event(20)` 会阻塞 20ms 导致持续丢帧
 - **爆炸模式 echo 效果**：60% 强度 = 最大效果（`mix = (intensity / 60.0).min(1.0)`），延迟 10~80ms，反馈 0~0.4，湿声增益 0~0.8。delay_buf 大小 24000 samples（500ms @ 48kHz），延迟不能超过 buf_len 否则 usize 减法下溢
 - **format_output_bytes 单声道→立体声扩展缺失**：v0.2.8 的 `format_output_bytes` 有 `upmix_to_stereo()` 先扩展再写字节，模块拆分（`5218730`）后丢失这一步，`samples.chunks(output_channels)` 把相邻 mono 样本错拆到左右声道。同时 32-bit float 路径缺少 `/32767` 归一化。症状：输出有刺啦杂音，安静时明显说话时被语音掩盖。修复：iterate mono frames × duplicate to channels，float 归一化
 - **RNNoise/Biquad denormal 浮点数累积**：RNNoise 静音帧输出极小值（~1e-30），Biquad 滤波器 `y1/y2` 状态在长时间静音后累积 denormal。经 gain/EQ 放大后产生可闻刺啦声。修复：降噪+strength mixing 后 `abs() < 1e-10` flush to zero；Biquad `y1/y2` 同理
