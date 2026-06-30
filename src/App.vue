@@ -119,6 +119,8 @@ const explodeEnabled = ref(false)
 const eqEnabled = ref(false)
 const eqActivePreset = ref('custom')
 const hasUpdate = ref(false)
+const frameDropWarning = ref(false)
+let framesDroppedPrev = 0
 
 let unlistenToggle: (() => void) | null = null
 let unlistenDevices: (() => void) | null = null
@@ -508,6 +510,15 @@ watch([denoiseEnabled, denoiseStrength], () => {
   saveConfig()
 })
 
+// 丢帧检测：frames_dropped 增长时显示警告，5 秒后自动消失
+watch(() => stats.value.frames_dropped, (curr) => {
+  if (curr > framesDroppedPrev) {
+    frameDropWarning.value = true
+    setTimeout(() => { frameDropWarning.value = false }, 5000)
+  }
+  framesDroppedPrev = curr
+})
+
 // 用户通过下拉列表切换设备时，重启引擎并保存配置
 watch([selectedInput, selectedOutput], () => {
   saveConfig()
@@ -814,7 +825,16 @@ onUnmounted(() => {
           <span class="stat-label">{{ t('stats.frames') }}</span>
           <span class="stat-value">{{ stats.frames_processed.toLocaleString() }}</span>
         </div>
+        <div v-if="stats.frames_dropped > 0" class="stat">
+          <span class="stat-label">{{ t('stats.dropped') }}</span>
+          <span class="stat-value stat-warn">{{ stats.frames_dropped }}</span>
+        </div>
       </section>
+      <Transition name="fade">
+        <div v-if="frameDropWarning" class="drop-warning">
+          ⚠ {{ t('stats.dropWarning') }}
+        </div>
+      </Transition>
     </main>
   </div>
 </template>
@@ -950,5 +970,28 @@ onUnmounted(() => {
   font-weight: 600;
   color: var(--text-primary);
   font-family: 'DM Mono', monospace;
+}
+
+.stat-warn {
+  color: #f59e0b;
+}
+
+.drop-warning {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: #f59e0b;
+  text-align: center;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 </style>

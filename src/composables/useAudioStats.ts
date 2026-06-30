@@ -9,6 +9,7 @@ interface AudioStats {
   cpu_usage: number
   frames_processed: number
   spectrum: number[]
+  frames_dropped: number
 }
 
 export function useAudioStats() {
@@ -20,6 +21,7 @@ export function useAudioStats() {
     cpu_usage: 0,
     frames_processed: 0,
     spectrum: [],
+    frames_dropped: 0,
   })
 
   let pollingInterval: ReturnType<typeof setInterval> | null = null

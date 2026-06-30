@@ -119,6 +119,8 @@ export default {
     reduction: 'Reduction',
     latency: 'Latency',
     frames: 'Frames',
+    dropped: 'Dropped',
+    dropWarning: 'Audio frame drops detected, likely due to high CPU load or system I/O blocking',
     input: 'Input',
     output: 'Output',
   },

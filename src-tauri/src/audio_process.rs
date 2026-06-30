@@ -21,6 +21,7 @@ pub struct FrameState {
     pub bgm_buf: Vec<i16>,
     pub output_buffer: Vec<u8>,
     pub frame_count: u64,
+    pub frames_dropped: u64,
     pub monitor_client: Option<wasapi::AudioClient>,
     pub monitor_render: Option<wasapi::AudioRenderClient>,
     pub monitor_event: Option<wasapi::Handle>,
@@ -589,6 +590,9 @@ pub fn process_frame(
             x_prev = x;
             y_prev = y;
         }
+        // Denormal flush：静音时状态累积极小值，denormal 运算比正常慢 10-100 倍
+        if !x_prev.is_finite() || x_prev.abs() < 1e-10 { x_prev = 0.0; }
+        if !y_prev.is_finite() || y_prev.abs() < 1e-10 { y_prev = 0.0; }
         state.hp_x_prev = x_prev;
         state.hp_y_prev = y_prev;
     }
@@ -679,8 +683,9 @@ pub fn process_frame(
         current_stats.noise_reduction_db = input_level_db - output_level_db;
         current_stats.latency_ms = input_latency + output_latency;
         current_stats.frames_processed = state.frame_count;
+        current_stats.frames_dropped = state.frames_dropped;
         compute_spectrum_into(&input_frame, &mut state.spectrum_buf);
-        current_stats.spectrum = state.spectrum_buf.to_vec();
+        current_stats.spectrum.copy_from_slice(&state.spectrum_buf);
     }
 
     out_bytes

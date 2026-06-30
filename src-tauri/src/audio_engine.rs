@@ -59,7 +59,8 @@ pub struct AudioStats {
     pub latency_ms: f32,
     pub cpu_usage: f32,
     pub frames_processed: u64,
-    pub spectrum: Vec<f32>,
+    pub spectrum: [f32; 32],
+    pub frames_dropped: u64,
 }
 
 /// 监听点：在音频链路的哪个阶段输出到监听设备
@@ -494,6 +495,7 @@ fn output_thread(
     debug_log("output_thread: started");
 
     let mut output_buf: Vec<u8> = Vec::with_capacity(frame_size * output_bytes_per_frame * 4);
+    let mut silence_buf: Vec<u8> = vec![0u8; frame_size * output_bytes_per_frame * 4];
     let mut read_pos: usize = 0;
     let mut write_ok_count: u32 = 0;
     let mut write_err_count: u32 = 0;
@@ -550,8 +552,10 @@ fn output_thread(
         } else {
             // 无数据：写满静音，维持 WASAPI 时钟
             let silence_bytes = available * output_bytes_per_frame;
-            let silence = vec![0u8; silence_bytes];
-            let _ = res.render.write_to_device(available, &silence, None);
+            if silence_buf.len() < silence_bytes {
+                silence_buf.resize(silence_bytes, 0);
+            }
+            let _ = res.render.write_to_device(available, &silence_buf[..silence_bytes], None);
         }
 
         // 4. 溢出保护
@@ -717,6 +721,7 @@ fn audio_loop(
         bgm_buf: Vec::new(),
         output_buffer: vec![0u8; max_output_frames * output_bytes_per_frame],
         frame_count: 0,
+        frames_dropped: 0,
         monitor_client: monitor.client.take(),
         monitor_render: monitor.render.take(),
         monitor_event: monitor.event.take(),
@@ -879,14 +884,23 @@ fn audio_loop(
                     let frame_us = t_frame_start.elapsed().as_micros();
                     frames_processed_this_iter += 1;
                     if frame_us > 12000 {
-                        debug_log(&format!("SLOW FRAME: process_frame took {}us (iter {})", frame_us, loop_iteration));
+                        frame_state.frames_dropped += 1;
+                        debug_log(&format!(
+                            "SLOW FRAME: {}us frame={} dropped={} acc_len={} iter={}",
+                            frame_us, frame_state.frame_count, frame_state.frames_dropped,
+                            input_acc.len(), loop_iteration
+                        ));
                     }
                     if out_bytes > 0 {
                         let mut buf = return_rx.try_recv().unwrap_or_else(|_| std::mem::take(&mut output_buf_pool[output_buf_idx]));
                         buf.clear();
                         buf.extend_from_slice(&frame_state.output_buffer[..out_bytes]);
-                        if output_tx.try_send(buf).is_err() && frame_state.frame_count % 2400 == 0 {
-                            debug_log("output channel full or closed, dropped frame");
+                        if output_tx.try_send(buf).is_err() {
+                            frame_state.frames_dropped += 1;
+                            debug_log(&format!(
+                                "OUTPUT DROP: channel full frame={} dropped={}",
+                                frame_state.frame_count, frame_state.frames_dropped
+                            ));
                         }
                         output_buf_idx = (output_buf_idx + 1) % output_buf_pool.len();
                     }
@@ -912,6 +926,15 @@ fn audio_loop(
                 let drain_us = t_drain_start.elapsed().as_micros();
                 if drain_us > 5000 {
                     debug_log(&format!("SLOW DRAIN: {}us acc_len={} iter={}", drain_us, input_acc.len(), loop_iteration));
+                }
+                // 每 500 帧（约 5 秒）输出一次丢帧汇总
+                if frame_state.frame_count % 500 == 0 && frame_state.frame_count > 0 {
+                    let drop_rate = frame_state.frames_dropped as f64 / frame_state.frame_count as f64 * 100.0;
+                    debug_log(&format!(
+                        "HEALTH: frame={} dropped={} ({:.2}%) acc_len={} iter={}",
+                        frame_state.frame_count, frame_state.frames_dropped,
+                        drop_rate, input_acc.len(), loop_iteration
+                    ));
                 }
             }
             Err(e) => {

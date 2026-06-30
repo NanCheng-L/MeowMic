@@ -10,13 +10,17 @@ static LOG_FILE: Mutex<Option<BufWriter<std::fs::File>>> = Mutex::new(None);
 static START_ELAPSED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 /// 写入调试日志到文件（打包后可用）
-/// 热路径安全：只写 BufWriter 内存缓冲区，不 flush 磁盘；轮转移到 stop 时
+/// 热路径安全：try_lock 拿不到锁就跳过，绝不阻塞音频线程
 pub fn debug_log(msg: &str) {
     let start = START_ELAPSED.get_or_init(|| std::time::Instant::now());
     let elapsed_ms = start.elapsed().as_millis();
     let line = format!("[{:>8}ms] {}\n", elapsed_ms, msg);
 
-    let mut guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    // try_lock：音频线程拿不到锁就丢弃这条日志，避免阻塞
+    let mut guard = match LOG_FILE.try_lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
     if guard.is_none() {
         let log_path = std::env::temp_dir().join("meowmic-debug.log");
         if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
@@ -24,7 +28,6 @@ pub fn debug_log(msg: &str) {
         }
     }
     if let Some(ref mut writer) = *guard {
-        // 不显式 flush —— BufWriter 内部 8KB 缓冲区满了自动写盘，单次 ~8KB 写入很快
         let _ = writer.write_all(line.as_bytes());
     }
 

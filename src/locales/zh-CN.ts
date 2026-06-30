@@ -119,6 +119,8 @@ export default {
     reduction: '降噪量',
     latency: '延迟',
     frames: '已处理帧',
+    dropped: '丢帧',
+    dropWarning: '检测到音频丢帧，可能是 CPU 负载过高或系统 I/O 阻塞',
     input: '输入',
     output: '输出',
   },
