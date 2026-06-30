@@ -906,11 +906,14 @@ fn audio_loop(
                     }
                 }
                 let iter_us = iter_start.elapsed().as_micros();
-                if iter_us > 15000 && !slow_frame_logged {
-                    debug_log(&format!("SLOW ITER: total={}us wait={}us frames={} iter={}",
-                        iter_us, t0, frames_processed_this_iter, loop_iteration));
-                    slow_frame_logged = true;
-                } else if iter_us <= 15000 {
+                if iter_us > 15000 {
+                    frame_state.frames_dropped += 1;
+                    if !slow_frame_logged {
+                        debug_log(&format!("SLOW ITER: total={}us wait={}us frames={} dropped={} iter={}",
+                            iter_us, t0, frames_processed_this_iter, frame_state.frames_dropped, loop_iteration));
+                        slow_frame_logged = true;
+                    }
+                } else {
                     slow_frame_logged = false;
                 }
                 // 消费完毕，清空 acc（保留未处理的尾部）
