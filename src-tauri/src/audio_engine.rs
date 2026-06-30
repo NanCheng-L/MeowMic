@@ -484,7 +484,18 @@ fn output_thread(
             fn GetCurrentThread() -> isize;
             fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
         }
+        #[link(name = "avrt")]
+        extern "system" {
+            fn AvSetMmThreadCharacteristicsA(taskName: *const u8, taskIndex: *mut u32) -> isize;
+            fn AvSetMmThreadPriority(handle: isize, priority: u32) -> i32;
+        }
         SetThreadPriority(GetCurrentThread(), 15);
+        let task_name = b"Pro Audio\0";
+        let mut task_index: u32 = 0;
+        let mmcss_handle = AvSetMmThreadCharacteristicsA(task_name.as_ptr(), &mut task_index);
+        if mmcss_handle != 0 {
+            AvSetMmThreadPriority(mmcss_handle, 2);
+        }
     }
 
     // 按官方示例：先 start_stream，循环内先写再等
@@ -622,15 +633,31 @@ fn audio_loop(
 ) -> Result<(), String> {
     let _ = initialize_mta().ok();
 
-    // 提升音频线程到实时优先级，防止游戏抢占 CPU 导致颤音
+    // 提升音频线程到实时优先级 + MMCSS 提权
     #[cfg(windows)]
     unsafe {
         extern "system" {
             fn GetCurrentThread() -> isize;
             fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
         }
+        #[link(name = "avrt")]
+        extern "system" {
+            fn AvSetMmThreadCharacteristicsA(taskName: *const u8, taskIndex: *mut u32) -> isize;
+            fn AvSetMmThreadPriority(handle: isize, priority: u32) -> i32;
+        }
         // THREAD_PRIORITY_TIME_CRITICAL = 15
         SetThreadPriority(GetCurrentThread(), 15);
+        // MMCSS: 注册为 "Pro Audio"，获得系统最高调度优先级
+        let task_name = b"Pro Audio\0";
+        let mut task_index: u32 = 0;
+        let mmcss_handle = AvSetMmThreadCharacteristicsA(task_name.as_ptr(), &mut task_index);
+        if mmcss_handle != 0 {
+            // AVRT_PRIORITY_CRITICAL = 2
+            AvSetMmThreadPriority(mmcss_handle, 2);
+            debug_log(&format!("MMCSS: registered as Pro Audio (task_index={})", task_index));
+        } else {
+            debug_log("MMCSS: failed to register, falling back to TIME_CRITICAL only");
+        }
     }
 
     debug_log("=== audio_loop started ===");
