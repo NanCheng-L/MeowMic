@@ -175,6 +175,13 @@ scripts/                # 构建/发布辅助脚本
 - **format_output_bytes 单声道→立体声扩展缺失**：v0.2.8 的 `format_output_bytes` 有 `upmix_to_stereo()` 先扩展再写字节，模块拆分（`5218730`）后丢失这一步，`samples.chunks(output_channels)` 把相邻 mono 样本错拆到左右声道。同时 32-bit float 路径缺少 `/32767` 归一化。症状：输出有刺啦杂音，安静时明显说话时被语音掩盖。修复：iterate mono frames × duplicate to channels，float 归一化
 - **RNNoise/Biquad denormal 浮点数累积**：RNNoise 静音帧输出极小值（~1e-30），Biquad 滤波器 `y1/y2` 状态在长时间静音后累积 denormal。经 gain/EQ 放大后产生可闻刺啦声。修复：降噪+strength mixing 后 `abs() < 1e-10` flush to zero；Biquad `y1/y2` 同理
 - **WebView2 GPU 进程占用**：Tauri 2 默认启用 GPU 硬件加速，WebView2 GPU 进程可能占用较高导致鼠标卡顿。优化手段：① `SpectrumVisualizer` 的 `requestAnimationFrame` 循环在无频谱数据时停止，避免 60fps 空转；② `AudioMeter` 从 32 个 DOM div 改为 Canvas 绘制，消除 class 切换 + CSS transition + box-shadow 的 GPU 合成开销；③ `useAudioStats` 轮询间隔从 50ms 放宽到 100ms，减少 invoke 和重绘频率
+- **wasapi 0.16 → 0.23 API 变化**：`DeviceCollection::new()` 改为 `DeviceEnumerator::new()?.get_device_collection()`；`get_periods()` 改为 `get_device_period()`；`initialize_client` 参数从 5 个变为 3 个：`(format, direction, &StreamMode::EventsShared { autoconvert, buffer_duration_hns })`
+- **输出缓冲区大小**：10ms 太小导致持续丢帧（处理速度跟不上实时要求）；50ms 可以但延迟大；20ms 是平衡点。偶发延迟靠重新预缓冲恢复
+- **输出线程重新预缓冲**：缓冲区空了之后必须重新进入预缓冲状态（等攒够 3 帧再写），否则会持续写静音导致卡顿。`prebuffered` flag 在缓冲区空时重置为 false
+- **帧处理积压限制**：每次迭代最多处理 2 帧，积压超过时跳过旧帧。否则处理慢时输入缓冲区溢出，导致持续卡顿
+- **丢帧计数预热期**：启动前 1000 帧（约 10 秒）不计入丢帧计数，跳过 WASAPI 初始化、模型加载、EQ 配置等延迟
+- **debug_log try_lock**：音频线程用 `Mutex::try_lock()` 而非 `lock()`，拿不到锁就丢弃日志，避免阻塞。BufWriter 8KB 缓冲区满时同步磁盘 I/O 会阻塞数毫秒
+- **AudioStats.spectrum 不用 Vec**：`[f32; 32].to_vec()` 每 5 帧堆分配 128 字节，长期运行导致堆碎片化。改为 `[f32; 32]` 固定数组 + `copy_from_slice()`
 
 ## 版本号管理
 

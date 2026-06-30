@@ -12,7 +12,11 @@ pub struct DeviceChangePayload {
 }
 
 fn enumerate_devices(direction: &wasapi::Direction) -> HashSet<String> {
-    let collection = match wasapi::DeviceCollection::new(direction) {
+    let enumerator = match wasapi::DeviceEnumerator::new() {
+        Ok(e) => e,
+        Err(_) => return HashSet::new(),
+    };
+    let collection = match enumerator.get_device_collection(direction) {
         Ok(c) => c,
         Err(_) => return HashSet::new(),
     };
@@ -69,7 +73,11 @@ pub fn start_device_watcher(app_handle: AppHandle, interval_ms: u64) {
 }
 
 fn enumerate_devices_list(direction: &wasapi::Direction) -> Vec<String> {
-    let collection = match wasapi::DeviceCollection::new(direction) {
+    let enumerator = match wasapi::DeviceEnumerator::new() {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let collection = match enumerator.get_device_collection(direction) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };

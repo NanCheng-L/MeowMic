@@ -171,7 +171,10 @@ fn get_audio_stats(state: State<'_, EngineState>) -> AudioStats {
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<String>, String> {
     let _ = wasapi::initialize_mta().ok();
-    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Capture)
+    let enumerator = wasapi::DeviceEnumerator::new()
+        .map_err(|e| format!("Failed to create device enumerator: {}", e))?;
+    let collection = enumerator
+        .get_device_collection(&wasapi::Direction::Capture)
         .map_err(|e| format!("Failed to get device collection: {}", e))?;
     let mut devices = Vec::new();
     let count = collection.get_nbr_devices().unwrap_or(0);
@@ -191,7 +194,10 @@ fn list_input_devices() -> Result<Vec<String>, String> {
 #[tauri::command]
 fn list_output_devices() -> Result<Vec<String>, String> {
     let _ = wasapi::initialize_mta().ok();
-    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Render)
+    let enumerator = wasapi::DeviceEnumerator::new()
+        .map_err(|e| format!("Failed to create device enumerator: {}", e))?;
+    let collection = enumerator
+        .get_device_collection(&wasapi::Direction::Render)
         .map_err(|e| format!("Failed to get device collection: {}", e))?;
     let mut devices = Vec::new();
     let count = collection.get_nbr_devices().unwrap_or(0);

@@ -69,18 +69,19 @@ pub fn init_audio_devices(
         input_format.get_subformat().unwrap_or(SampleType::Int)
     );
 
-    let (def_time, _min_time) = input_client
-        .get_periods()
+    let (def_time, min_time) = input_client
+        .get_device_period()
         .map_err(|e| format!("Failed to get input periods: {}", e))?;
+    log::info!("Input periods: default={}us, min={}us", def_time / 10, min_time / 10);
+    debug_log(&format!("Input periods: default={}us, min={}us", def_time / 10, min_time / 10));
 
+    // 输入用最小缓冲区，减少延迟
+    let input_mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: min_time,
+    };
     input_client
-        .initialize_client(
-            &input_format,
-            def_time,
-            &Direction::Capture,
-            &ShareMode::Shared,
-            true,
-        )
+        .initialize_client(&input_format, &Direction::Capture, &input_mode)
         .map_err(|e| format!("Failed to initialize input client: {}", e))?;
 
     let input_handle = input_client
@@ -103,18 +104,20 @@ pub fn init_audio_devices(
         output_format.get_subformat().unwrap_or(SampleType::Int)
     );
 
-    let (def_time, _min_time) = output_client
-        .get_periods()
+    let (def_time, min_time) = output_client
+        .get_device_period()
         .map_err(|e| format!("Failed to get output periods: {}", e))?;
+    log::info!("Output periods: default={}us, min={}us", def_time / 10, min_time / 10);
+    debug_log(&format!("Output periods: default={}us, min={}us", def_time / 10, min_time / 10));
 
+    // 输出用 20ms 缓冲区，平衡延迟和稳定性
+    let output_buffer_hns = 200_000i64; // 20ms = 200000 * 100ns
+    let output_mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: output_buffer_hns.max(def_time),
+    };
     output_client
-        .initialize_client(
-            &output_format,
-            def_time,
-            &Direction::Render,
-            &ShareMode::Shared,
-            true,
-        )
+        .initialize_client(&output_format, &Direction::Render, &output_mode)
         .map_err(|e| format!("Failed to initialize output client: {}", e))?;
     log::info!("Output client initialized on '{}'", output_friendly);
 
@@ -212,19 +215,17 @@ pub fn init_monitor(
                     .unwrap_or(48000);
                 let monitor_format =
                     WaveFormat::new(16, 16, &SampleType::Int, device_sample_rate as usize, 2, None);
-                let (def_time, _) = m_client.get_periods().unwrap_or((0, 0));
+                let (def_time, _) = m_client.get_device_period().unwrap_or((0, 0));
                 debug_log(&format!(
                     "Monitor: initializing client on '{}' ({}Hz, format={:?})",
                     device_name, device_sample_rate, monitor_format
                 ));
+                let monitor_mode = StreamMode::EventsShared {
+                    autoconvert: true,
+                    buffer_duration_hns: def_time,
+                };
                 if m_client
-                    .initialize_client(
-                        &monitor_format,
-                        def_time,
-                        &Direction::Render,
-                        &ShareMode::Shared,
-                        true,
-                    )
+                    .initialize_client(&monitor_format, &Direction::Render, &monitor_mode)
                     .is_ok()
                 {
                     if let Ok(render) = m_client.get_audiorenderclient() {

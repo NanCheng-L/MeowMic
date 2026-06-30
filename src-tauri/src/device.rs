@@ -6,14 +6,19 @@ pub fn find_device(name: Option<&str>, input: bool) -> Result<Device, String> {
     } else {
         Direction::Render
     };
-    let collection = DeviceCollection::new(&direction)
-        .map_err(|e| format!("Failed to get device collection: {}", e))?;
+    let enumerator = DeviceEnumerator::new()
+        .map_err(|e| format!("Failed to create device enumerator: {}", e))?;
 
     if let Some(target_name) = name {
+        let collection = enumerator
+            .get_device_collection(&direction)
+            .map_err(|e| format!("Failed to get device collection: {}", e))?;
         collection
             .get_device_with_name(target_name)
             .map_err(|e| format!("Device '{}' not found: {}", target_name, e))
     } else {
-        get_default_device(&direction).map_err(|e| format!("Failed to get default device: {}", e))
+        enumerator
+            .get_default_device(&direction)
+            .map_err(|e| format!("Failed to get default device: {}", e))
     }
 }

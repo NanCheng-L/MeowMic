@@ -523,10 +523,14 @@ pub fn bgm_process_loop(
         pid
     );
 
-    // 进程 loopback 不支持 get_periods()，用 0 让 WASAPI 用默认值
+    // 进程 loopback 不支持 get_device_period()，用 0 让 WASAPI 用默认值
     debug_log(&format!("bgm_loop[{}]: initializing client", pid));
+    let bgm_mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: 0,
+    };
     client
-        .initialize_client(&format, 0, &Direction::Capture, &ShareMode::Shared, true)
+        .initialize_client(&format, &Direction::Capture, &bgm_mode)
         .map_err(|e| format!("Failed to initialize BGM client: {}", e))?;
     if !running.load(Ordering::Acquire) {
         return Ok(());

@@ -508,8 +508,12 @@ fn output_thread(
     let mut output_buf: Vec<u8> = Vec::with_capacity(frame_size * output_bytes_per_frame * 4);
     let mut silence_buf: Vec<u8> = vec![0u8; frame_size * output_bytes_per_frame * 4];
     let mut read_pos: usize = 0;
+    // 预缓冲：攒够 min_buffer_frames 帧再开始写，吸收处理线程抖动
+    let min_buffer_frames: usize = 3;
+    let mut prebuffered = false;
     let mut write_ok_count: u32 = 0;
     let mut write_err_count: u32 = 0;
+    let mut silence_count: u32 = 0;
     let mut stats_start = std::time::Instant::now();
     let frame_bytes = frame_size * output_bytes_per_frame;
 
@@ -534,6 +538,24 @@ fn output_thread(
 
         let valid_len = output_buf.len() - read_pos;
         let valid_frames = valid_len / output_bytes_per_frame;
+
+        // 缓冲区空了，重新进入预缓冲状态（等攒够数据再写，避免持续写静音）
+        if prebuffered && valid_frames == 0 {
+            prebuffered = false;
+            debug_log("output_thread: buffer underrun, re-prebuffering");
+        }
+
+        // 预缓冲：攒够 min_buffer_frames 帧再开始写
+        if !prebuffered {
+            if valid_frames >= min_buffer_frames {
+                prebuffered = true;
+                debug_log(&format!("output_thread: prebuffered {} frames, starting playback", valid_frames));
+            } else {
+                // 还没攒够，等一下再收集数据
+                let _ = res.event.wait_for_event(10);
+                continue;
+            }
+        }
 
         // 3. 写满可用空间（有数据写数据，没数据写静音）
         if valid_frames > 0 {
@@ -562,6 +584,7 @@ fn output_thread(
             }
         } else {
             // 无数据：写满静音，维持 WASAPI 时钟
+            silence_count += 1;
             let silence_bytes = available * output_bytes_per_frame;
             if silence_buf.len() < silence_bytes {
                 silence_buf.resize(silence_bytes, 0);
@@ -582,11 +605,12 @@ fn output_thread(
         if stats_start.elapsed().as_secs() >= 5 {
             let pending = (output_buf.len() - read_pos) / output_bytes_per_frame;
             debug_log(&format!(
-                "output_thread stats: wrote={} err={} pending_frames={}",
-                write_ok_count, write_err_count, pending,
+                "output_thread stats: wrote={} silence={} err={} pending_frames={}",
+                write_ok_count, silence_count, write_err_count, pending,
             ));
             write_ok_count = 0;
             write_err_count = 0;
+            silence_count = 0;
             stats_start = std::time::Instant::now();
         }
 
@@ -900,8 +924,18 @@ fn audio_loop(
                 input_acc.extend_from_slice(&frame_state.resample_buf[..resampled_len]);
 
                 // 每攒够 frame_size (480) 个样本就处理一帧
+                // 限制每次最多处理 2 帧，积压太多时跳过旧帧，避免阻塞输入读取
+                let max_frames_per_iter = 2u32;
                 let mut frames_processed_this_iter = 0u32;
-                while input_acc.len() - frame_state.input_read_pos >= frame_size {
+                let available_frames = (input_acc.len() - frame_state.input_read_pos) / frame_size;
+                if available_frames > max_frames_per_iter as usize {
+                    // 积压过多，跳过旧帧，只处理最新的
+                    let skip = (available_frames - max_frames_per_iter as usize) * frame_size;
+                    frame_state.input_read_pos += skip;
+                    debug_log(&format!("SKIP {} old frames (acc_len={} available={})",
+                        skip / frame_size, input_acc.len(), available_frames));
+                }
+                while input_acc.len() - frame_state.input_read_pos >= frame_size && frames_processed_this_iter < max_frames_per_iter {
                     let start = frame_state.input_read_pos;
                     let mut chunk = [0.0f32; 480];
                     chunk.copy_from_slice(&input_acc[start..start + frame_size]);
@@ -911,7 +945,10 @@ fn audio_loop(
                     let frame_us = t_frame_start.elapsed().as_micros();
                     frames_processed_this_iter += 1;
                     if frame_us > 12000 {
-                        frame_state.frames_dropped += 1;
+                        // 前 1000 帧是预热期（约 10 秒），不计入丢帧
+                        if loop_iteration > 1000 {
+                            frame_state.frames_dropped += 1;
+                        }
                         debug_log(&format!(
                             "SLOW FRAME: {}us frame={} dropped={} acc_len={} iter={}",
                             frame_us, frame_state.frame_count, frame_state.frames_dropped,
@@ -934,7 +971,10 @@ fn audio_loop(
                 }
                 let iter_us = iter_start.elapsed().as_micros();
                 if iter_us > 15000 {
-                    frame_state.frames_dropped += 1;
+                    // 前 1000 帧是预热期（约 10 秒），不计入丢帧
+                    if loop_iteration > 1000 {
+                        frame_state.frames_dropped += 1;
+                    }
                     if !slow_frame_logged {
                         debug_log(&format!("SLOW ITER: total={}us wait={}us frames={} dropped={} iter={}",
                             iter_us, t0, frames_processed_this_iter, frame_state.frames_dropped, loop_iteration));
