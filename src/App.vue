@@ -267,9 +267,12 @@ const handleStart = async () => {
     conflictRetries = 0
     // 启动后同步降噪开关状态到后端
     await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
-    // 同步监听点到后端
-    if (monitorPoint.value > 0) {
-      await setMonitorPoint(monitorPoint.value)
+    // 同步监听开关和监听点到后端
+    if (monitorEnabled.value) {
+      await setMonitorMode(true)
+      if (monitorPoint.value > 0) {
+        await setMonitorPoint(monitorPoint.value)
+      }
     }
     // 同步 EQ 配置到后端（开关 + bands）
     await syncEqConfig()
@@ -281,8 +284,11 @@ const handleStart = async () => {
       console.warn('Engine already running, syncing state')
       isRunning.value = true
       await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
-      if (monitorPoint.value > 0) {
-        await setMonitorPoint(monitorPoint.value)
+      if (monitorEnabled.value) {
+        await setMonitorMode(true)
+        if (monitorPoint.value > 0) {
+          await setMonitorPoint(monitorPoint.value)
+        }
       }
       // 同步 EQ 配置到后端
       await syncEqConfig()

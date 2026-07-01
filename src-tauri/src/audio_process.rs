@@ -1,6 +1,6 @@
-/// 音频处理模块
-///
-/// 包含降噪、增益、EQ、爆炸模式、BGM 混音、Soft limiter 等处理函数。
+#![allow(dead_code)]
+
+/// 音频处理模块（旧单线程架构代码，已被 dsp_thread 替代，保留供参考）
 
 use crate::audio_engine::DenoiseConfig;
 use crate::audio_utils::{calculate_rms, compute_spectrum_into, resample_in_place, write_to_monitor};

@@ -9,9 +9,12 @@ mod device;
 mod device_watcher;
 mod eq;
 mod explode;
+mod mmcss;
+mod wasapi_capture;
+mod wasapi_render;
 
 use audio_engine::{AudioEngine, AudioStats};
-use audio_engine::debug_log;
+use debug::debug_log;
 use eq::{EqConfig, EQ_FREQUENCIES, EQ_PRESET_NAMES};
 use explode::ExplodeEffect;
 use parking_lot::Mutex;
@@ -115,7 +118,7 @@ fn start_denoising(
     input_device: Option<String>,
     output_device: Option<String>,
     model: Option<String>,
-    monitor_enabled: Option<bool>,
+    _monitor_enabled: Option<bool>,
 ) -> Result<(), String> {
     // 优先用 Tauri 资源目录（build 模式），fallback 到源码目录（dev 模式）
     // resource_dir 指向 resources/ 父目录（包含 models/、deepfilter/ 等子目录）
@@ -129,7 +132,7 @@ fn start_denoising(
         }
     });
     let engine = state.engine.lock();
-    engine.start(input_device, output_device, model, resource_dir, monitor_enabled.unwrap_or(false))
+    engine.start(input_device, output_device, model, resource_dir)
 }
 
 #[tauri::command]
@@ -165,7 +168,8 @@ fn update_denoise_config(
 #[tauri::command]
 fn get_audio_stats(state: State<'_, EngineState>) -> AudioStats {
     let engine = state.engine.lock();
-    engine.get_stats()
+    let stats = engine.stats().read().clone();
+    stats
 }
 
 #[tauri::command]
@@ -360,23 +364,23 @@ fn list_audio_processes(state: State<'_, EngineState>) -> Result<Vec<(String, St
 
 #[tauri::command]
 fn start_bgm(state: State<'_, EngineState>, pids: Vec<u32>) -> Result<(), String> {
-    audio_engine::debug_log("lib: start_bgm command received, locking engine...");
+    debug::debug_log("lib: start_bgm command received, locking engine...");
     let engine = state.engine.lock();
-    audio_engine::debug_log("lib: start_bgm engine locked, calling start_bgm...");
-    let result = engine.start_bgm(pids);
-    audio_engine::debug_log("lib: start_bgm done");
+    debug::debug_log("lib: start_bgm engine locked, calling start_bgm...");
+    let result = engine.start_bgm(pids[0]);
+    debug::debug_log("lib: start_bgm done");
     result
 }
 
 #[tauri::command]
 fn stop_bgm(state: State<'_, EngineState>) -> Result<(), String> {
-    audio_engine::debug_log("lib: stop_bgm command received, locking engine...");
+    debug::debug_log("lib: stop_bgm command received, locking engine...");
     let engine = state.engine.lock();
-    audio_engine::debug_log("lib: stop_bgm engine locked, calling stop_bgm...");
+    debug::debug_log("lib: stop_bgm engine locked, calling stop_bgm...");
     engine.stop_bgm();
     // 用户手动停止 BGM，取消引擎重启后的自动恢复
     engine.cancel_bgm_auto_restart();
-    audio_engine::debug_log("lib: stop_bgm done");
+    debug::debug_log("lib: stop_bgm done");
     Ok(())
 }
 
@@ -474,7 +478,7 @@ pub fn run() {
     // 单实例检查
     ensure_single_instance();
 
-    let engine = Arc::new(Mutex::new(AudioEngine::new()));
+    let engine = Arc::new(Mutex::new(AudioEngine::new(None)));
     let is_hidden = std::env::args().any(|a| a == "--hidden");
 
     tauri::Builder::default()

@@ -64,6 +64,8 @@ impl Biquad {
         self.y2 = 0.0;
     }
 
+
+
     fn process(&mut self, input: f32) -> f32 {
         let output = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1 - self.a2 * self.y2;
@@ -71,16 +73,13 @@ impl Biquad {
         self.x1 = input;
         self.y2 = self.y1;
         self.y1 = output;
-        // 检测 NaN/Inf 污染，自动重置状态防止永久毒化
         if !output.is_finite() {
             self.reset_state();
             return 0.0;
         }
-        // Denormal flush: 静音帧时内部状态可能累积极小值，产生刺啦声
-        if self.x1.abs() < 1e-4 { self.x1 = 0.0; }
-        if self.x2.abs() < 1e-4 { self.x2 = 0.0; }
-        if self.y1.abs() < 1e-4 { self.y1 = 0.0; }
-        if self.y2.abs() < 1e-4 { self.y2 = 0.0; }
+        // Denormal flush
+        if self.y1.abs() < 1e-10 { self.y1 = 0.0; }
+        if self.y2.abs() < 1e-10 { self.y2 = 0.0; }
         output
     }
 }
@@ -92,7 +91,7 @@ fn peaking_eq_coefficients(gain_db: f32, freq: f32, sample_rate: f32, q: f32) ->
         return (1.0, 0.0, 0.0, 0.0, 0.0);
     }
 
-    let a = 10.0_f32.powf(gain_db / 40.0);
+    let a = 10.0_f32.powf(gain_db / 20.0);
     let w0 = 2.0 * std::f32::consts::PI * freq / sample_rate;
     let sin_w0 = w0.sin();
     let cos_w0 = w0.cos();
@@ -146,10 +145,11 @@ impl EqProcessor {
         f.a2 = a2;
     }
 
-    /// 应用完整 EQ 配置
+    /// 应用完整 EQ 配置（清空所有 biquad 状态避免系数变更时的瞬态爆炸）
     pub fn apply_config(&mut self, config: &EqConfig) {
         for (i, &gain) in config.bands.iter().enumerate() {
             self.set_band(i, gain);
+            self.filters[i].reset_state();
         }
     }
 
@@ -161,6 +161,13 @@ impl EqProcessor {
                 sum = filter.process(sum);
             }
             *sample = sum;
+        }
+    }
+
+    /// 重置所有 biquad 状态（信号门关闭时调用，防止状态累积）
+    pub fn reset_all(&mut self) {
+        for filter in self.filters.iter_mut() {
+            filter.reset_state();
         }
     }
 }

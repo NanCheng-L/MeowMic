@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use wasapi::*;
 
 pub fn calculate_rms(samples: &[f32]) -> f32 {
@@ -36,8 +37,6 @@ pub fn compute_spectrum_into(samples: &[f32], output: &mut [f32]) {
 }
 
 /// 将 f32 样本写入监听设备（非阻塞，使用预分配的 monitor_buffer）
-///
-/// `monitor_buffer` 必须足够大以容纳重采样后的数据（至少 `samples.len() * (monitor_sample_rate / 48000).ceil() * 4` 字节）
 pub fn write_to_monitor(
     samples: &[f32],
     render_opt: &Option<AudioRenderClient>,
@@ -48,17 +47,18 @@ pub fn write_to_monitor(
 ) {
     let render = match render_opt {
         Some(r) => r,
-        None => return,
-    };
-
-    // 短超时：最多等 2ms（远小于 10ms 帧预算），避免阻塞主循环导致输出丢帧
-    if let Some(evt) = event_opt {
-        if evt.wait_for_event(2).is_err() {
+        None => {
+            crate::debug::debug_log("write_to_monitor: render is None");
             return;
         }
+    };
+
+    // 等待设备事件（非阻塞，2ms 超时）
+    if let Some(evt) = event_opt {
+        let _ = evt.wait_for_event(2);
     }
 
-    // 重采样到监听设备采样率（写入 resample_buf，避免堆分配）
+    // 重采样到监听设备采样率
     let frames = if monitor_sample_rate != 48000 {
         resample_in_place(samples, 48000, monitor_sample_rate, resample_buf)
     } else {
@@ -67,24 +67,29 @@ pub fn write_to_monitor(
         len
     };
 
-    let stereo_bytes = frames * 4; // 每帧 stereo i16 = 4 bytes
+    let stereo_bytes = frames * 4;
     if stereo_bytes > monitor_buffer.len() {
         return;
     }
 
-    // 单声道 → 立体声 + f32 → i16 + 写入 monitor_buffer
+    // 单声道 → 立体声 + normalized f32 → i16
     for i in 0..frames {
-        let val = resample_buf[i].clamp(-32768.0, 32767.0) as i16;
+        let val = (resample_buf[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
         let bytes = val.to_le_bytes();
         let pos = i * 4;
         if pos + 4 <= monitor_buffer.len() {
             monitor_buffer[pos] = bytes[0];
             monitor_buffer[pos + 1] = bytes[1];
-            monitor_buffer[pos + 2] = bytes[0]; // 立体声复制
+            monitor_buffer[pos + 2] = bytes[0];
             monitor_buffer[pos + 3] = bytes[1];
         }
     }
-    let _ = render.write_to_device(frames, &monitor_buffer[..stereo_bytes], None);
+    match render.write_to_device(frames, &monitor_buffer[..stereo_bytes], None) {
+        Ok(()) => {}
+        Err(e) => {
+            crate::debug::debug_log(&format!("Monitor write_to_device FAILED: frames={} err={:?}", frames, e));
+        }
+    }
 }
 
 /// 线性插值重采样（写入预分配的 output buffer，返回实际写入的样本数）

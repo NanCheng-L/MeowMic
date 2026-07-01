@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// 音频设备初始化模块
 ///
 /// 负责 WASAPI 输入/输出/监听设备的初始化和配置。
@@ -7,6 +9,7 @@ use crate::device::find_device;
 use wasapi::*;
 
 /// 音频设备资源（输入 + 输出）
+#[allow(dead_code)]
 pub struct AudioDevices {
     pub input_client: AudioClient,
     pub input_capture: AudioCaptureClient,
@@ -110,11 +113,10 @@ pub fn init_audio_devices(
     log::info!("Output periods: default={}us, min={}us", def_time / 10, min_time / 10);
     debug_log(&format!("Output periods: default={}us, min={}us", def_time / 10, min_time / 10));
 
-    // 输出用 20ms 缓冲区，平衡延迟和稳定性
-    let output_buffer_hns = 200_000i64; // 20ms = 200000 * 100ns
+    // 输出用默认缓冲区（~10ms），输出线程通过 wait_event 与设备时钟同步
     let output_mode = StreamMode::EventsShared {
         autoconvert: true,
-        buffer_duration_hns: output_buffer_hns.max(def_time),
+        buffer_duration_hns: def_time,
     };
     output_client
         .initialize_client(&output_format, &Direction::Render, &output_mode)
@@ -237,8 +239,8 @@ pub fn init_monitor(
                             device_sample_rate
                         );
                         debug_log(&format!(
-                            "Monitor: READY on '{}' ({}Hz)",
-                            device_name, device_sample_rate
+                            "Monitor: READY on '{}' ({}Hz, render_ok={}, evt_ok={})",
+                            device_name, device_sample_rate, true, evt.is_ok()
                         ));
                         state.client = Some(m_client);
                         state.render = Some(render);

@@ -14,6 +14,9 @@ pub struct DeepFilterFFI {
     channels: usize,
     set_atten_lim: FnSetAttenLim,
     _set_post_filter_beta: FnSetPostFilterBeta,
+    /// 预分配缓冲区，避免音频热路径堆分配
+    norm_input: Vec<f32>,
+    norm_output: Vec<f32>,
 }
 
 // DLL 函数签名
@@ -98,6 +101,8 @@ impl DeepFilterFFI {
                 channels,
                 set_atten_lim,
                 _set_post_filter_beta: set_post_filter_beta,
+                norm_input: vec![0.0f32; frame_size],
+                norm_output: vec![0.0f32; frame_size],
             })
         }
     }
@@ -142,18 +147,14 @@ impl DenoiseModel for DeepFilterFFI {
                     .expect("dfgui_process_frame not found")
             );
 
-            // DLL 期望 -1.0 到 1.0 的标准化音频
-            // 我们的音频是 i16 范围 (-32768 到 32767)，需要归一化
-            let mut normalized_input = vec![0.0f32; len];
+            // 管线是 normalized f32 [-1.0, 1.0]，DLL 也期望此范围，直接传入
             for i in 0..len {
-                normalized_input[i] = input[i] / 32768.0;
+                self.norm_input[i] = input[i];
             }
-            let mut normalized_output = vec![0.0f32; len];
-            let _attenuation = process(self.state, normalized_input.as_ptr(), normalized_output.as_mut_ptr());
+            let _attenuation = process(self.state, self.norm_input.as_ptr(), self.norm_output.as_mut_ptr());
 
-            // 还原到 i16 范围
             for i in 0..len {
-                output[i] = normalized_output[i] * 32768.0;
+                output[i] = self.norm_output[i];
             }
 
             // 对于输出不足的部分，用 0 填充

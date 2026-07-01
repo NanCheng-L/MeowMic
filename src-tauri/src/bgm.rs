@@ -497,7 +497,7 @@ pub fn bgm_process_loop(
             fn GetCurrentThread() -> isize;
             fn SetThreadPriority(hThread: isize, nPriority: i32) -> i32;
         }
-        SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
+        SetThreadPriority(GetCurrentThread(), 2); // THREAD_PRIORITY_HIGHEST
     }
 
     debug_log(&format!("bgm_loop[{}]: initializing MTA", pid));
