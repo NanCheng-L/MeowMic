@@ -9,7 +9,7 @@ export function useAudioEngine() {
     await invoke('stop_denoising')
   }
 
-  const updateConfig = async (config: { enabled?: boolean; strength?: number; micGain?: number }) => {
+  const updateConfig = async (config: { enabled?: boolean; strength?: number; micGain?: number; suppressLevel?: number }) => {
     await invoke('update_denoise_config', config)
   }
 

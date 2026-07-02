@@ -128,15 +128,12 @@ impl DenoiseModel for DeepFilterFFI {
             return;
         }
 
-        // DLL 期望 mono interleaved（单声道时就是顺序排列）
-        // input/output 长度应为 frame_size * channels
         let expected_len = self.frame_size * self.channels;
         if input.len() < expected_len || output.len() < expected_len {
             log::warn!(
                 "DeepFilterNet: frame size mismatch, input={} output={} expected={}",
                 input.len(), output.len(), expected_len
             );
-            // 尝试用实际长度
         }
 
         let len = input.len().min(output.len()).min(expected_len);
@@ -147,17 +144,28 @@ impl DenoiseModel for DeepFilterFFI {
                     .expect("dfgui_process_frame not found")
             );
 
-            // 管线是 normalized f32 [-1.0, 1.0]，DLL 也期望此范围，直接传入
+            // ══════════════════════════════════════════════════════════════
+            // 【DeepFilterNet DLL 范围转换 — 禁止删除或修改】
+            //
+            // 管线范围: normalized f32 [-1.0, 1.0]
+            // DLL 期望: normalized f32 [-1.0, 1.0]（旧代码注释确认）
+            //
+            // 旧版本（三线程重构前）管线是 i16 范围，代码为：
+            //   normalized_input[i] = input[i] / 32768.0  (i16 → normalized → DLL)
+            //   output[i] = normalized_output[i] * 32768.0 (DLL → normalized → i16)
+            //
+            // 三线程重构后管线改为 normalized，直接传入 DLL 即可。
+            //
+            // ⚠️ 不要加 *32768 缩放！DLL 期望 normalized，不是 i16 范围！
+            // ══════════════════════════════════════════════════════════════
             for i in 0..len {
                 self.norm_input[i] = input[i];
             }
             let _attenuation = process(self.state, self.norm_input.as_ptr(), self.norm_output.as_mut_ptr());
-
             for i in 0..len {
                 output[i] = self.norm_output[i];
             }
 
-            // 对于输出不足的部分，用 0 填充
             if len < output.len() {
                 output[len..].fill(0.0);
             }

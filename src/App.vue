@@ -34,6 +34,7 @@ const isRunning = ref(false)
 const denoiseEnabled = ref(false)
 const denoiseStrength = ref(0.5)
 const micGain = ref(1.0)
+const suppressLevel = ref(0.0) // 噪声门：RNNoise 默认 0.3，DeepFilterNet3 默认 0
 const isLoading = ref(false)
 
 const openTutorial = async () => {
@@ -154,8 +155,13 @@ const loadConfig = () => {
       if (config.denoiseStrength !== undefined) denoiseStrength.value = config.denoiseStrength
       if (config.micGain !== undefined) micGain.value = config.micGain
       if (config.selectedModel) {
-        // 旧版模型名迁移
         selectedModel.value = config.selectedModel === 'DeepFilterNet' ? 'DeepFilterNet3' : config.selectedModel
+      }
+      // suppressLevel：旧版本没有此字段时，RNNoise 默认 0.3，DeepFilterNet3 默认 0
+      if (config.suppressLevel !== undefined) {
+        suppressLevel.value = config.suppressLevel
+      } else if (selectedModel.value === 'RNNoise') {
+        suppressLevel.value = 0.3
       }
       if (config.selectedPreset) selectedPreset.value = config.selectedPreset
       if (config.monitorEnabled !== undefined) monitorEnabled.value = config.monitorEnabled
@@ -179,6 +185,7 @@ const saveConfig = () => {
       denoiseEnabled: denoiseEnabled.value,
       denoiseStrength: denoiseStrength.value,
       micGain: micGain.value,
+      suppressLevel: suppressLevel.value,
       selectedModel: selectedModel.value,
       selectedPreset: selectedPreset.value,
       monitorEnabled: monitorEnabled.value,
@@ -266,7 +273,7 @@ const handleStart = async () => {
     isRunning.value = true
     conflictRetries = 0
     // 启动后同步降噪开关状态到后端
-    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
+    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value, suppressLevel: suppressLevel.value })
     // 同步监听开关和监听点到后端
     if (monitorEnabled.value) {
       await setMonitorMode(true)
@@ -283,7 +290,7 @@ const handleStart = async () => {
     if (msg.includes('already running')) {
       console.warn('Engine already running, syncing state')
       isRunning.value = true
-      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value })
+      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value, suppressLevel: suppressLevel.value })
       if (monitorEnabled.value) {
         await setMonitorMode(true)
         if (monitorPoint.value > 0) {
@@ -380,6 +387,14 @@ const handlePresetChange = (preset: string) => {
 
 const handleModelChange = async (model: string) => {
   selectedModel.value = model
+  // RNNoise 自动开启噪声门，DeepFilterNet3 关闭
+  if (model === 'RNNoise') {
+    suppressLevel.value = 0.3
+    await updateConfig({ suppressLevel: 0.3 })
+  } else {
+    suppressLevel.value = 0.0
+    await updateConfig({ suppressLevel: 0.0 })
+  }
   saveConfig()
   // 切换模型需要重启引擎
   if (isRunning.value) {

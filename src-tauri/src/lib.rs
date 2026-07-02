@@ -148,9 +148,9 @@ fn update_denoise_config(
     enabled: Option<bool>,
     strength: Option<f32>,
     mic_gain: Option<f32>,
+    suppress_level: Option<f32>,
 ) -> Result<(), String> {
     let engine = state.engine.lock();
-    // 读取当前配置，只更新传入的字段
     let mut config = engine.get_config();
     if let Some(e) = enabled {
         config.enabled = e;
@@ -160,6 +160,9 @@ fn update_denoise_config(
     }
     if let Some(g) = mic_gain {
         config.mic_gain = g.clamp(0.5, 10.0);
+    }
+    if let Some(sl) = suppress_level {
+        config.suppress_level = sl.clamp(0.0, 1.0);
     }
     engine.update_config(config);
     Ok(())
@@ -418,6 +421,7 @@ fn set_monitor_mode(state: State<'_, EngineState>, enabled: bool) -> Result<(), 
 
 #[tauri::command]
 fn set_monitor_point(state: State<'_, EngineState>, point: u32) -> Result<(), String> {
+    debug_log(&format!("set_monitor_point: point={}", point));
     let engine = state.engine.lock();
     engine.set_monitor_point(point);
     Ok(())

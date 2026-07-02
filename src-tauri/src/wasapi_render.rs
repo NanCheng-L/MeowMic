@@ -78,14 +78,41 @@ fn render_loop(
             enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
                 .map_err(|e| format!("GetDefaultAudioEndpoint: {}", e))?
         } else {
-            // 尝试用设备 ID 查找，失败则用默认设备
+            // GetDevice 需要设备 ID，但我们传的是友好名称
+            // 先尝试直接用 GetDevice，失败则枚举设备列表按友好名称查找
             let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
             match enumerator.GetDevice(PCWSTR::from_raw(wide.as_ptr())) {
                 Ok(d) => d,
                 Err(_) => {
-                    log::warn!("render: device '{}' not found, using default", device_id);
-                    enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
-                        .map_err(|e| format!("GetDefaultAudioEndpoint fallback: {}", e))?
+                    // 枚举渲染设备，按友好名称匹配
+                    crate::debug::debug_log(&format!("RENDER: GetDevice failed for '{}', enumerating...", device_id));
+                    let collection = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+                        .map_err(|e| format!("EnumAudioEndpoints: {}", e))?;
+                    let count = collection.GetCount()
+                        .map_err(|e| format!("GetCount: {}", e))?;
+                    let mut found = None;
+                    for i in 0..count {
+                        if let Ok(dev) = collection.Item(i) {
+                            if let Ok(props) = dev.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
+                                if let Ok(name_var) = props.GetValue(&windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName) {
+                                    let name = name_var.to_string();
+                                    if name == device_id {
+                                        crate::debug::debug_log(&format!("RENDER: matched device '{}' at index {}", name, i));
+                                        found = Some(dev);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    match found {
+                        Some(d) => d,
+                        None => {
+                            crate::debug::debug_log(&format!("RENDER: device '{}' not found in enumeration, using default", device_id));
+                            enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
+                                .map_err(|e| format!("GetDefaultAudioEndpoint fallback: {}", e))?
+                        }
+                    }
                 }
             }
         };
@@ -98,11 +125,17 @@ fn render_loop(
         let device_rate = (*mix_ptr).nSamplesPerSec;
         let device_channels = (*mix_ptr).nChannels as usize;
         let device_block_align = (*mix_ptr).nBlockAlign as u32;
+        let device_bits = (*mix_ptr).wBitsPerSample;
+        let device_subformat = (*mix_ptr).wFormatTag;
 
         log::info!(
-            "render: device_rate={} channels={} block_align={}",
-            device_rate, device_channels, device_block_align
+            "render: device_rate={} channels={} block_align={} bits={} format={}",
+            device_rate, device_channels, device_block_align, device_bits, device_subformat
         );
+        crate::debug::debug_log(&format!(
+            "RENDER_INIT: rate={} ch={} block_align={} bits={} format={} device='{}'",
+            device_rate, device_channels, device_block_align, device_bits, device_subformat, device_id
+        ));
 
         let init_res = client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -137,6 +170,7 @@ fn render_loop(
 
         let mut upconverter = UpConverter::new(SAMPLE_RATE, device_rate, device_channels);
         let mut pending: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 2);
+        let mut render_tick: u64 = 0;
 
         while !stop.load(Ordering::Acquire) {
             let wait = WaitForSingleObject(event, 200);
@@ -154,14 +188,29 @@ fn render_loop(
             // 拉取 mono 帧直到有足够数据填充 frames_writable
             let needed_src = ((frames_writable as u64 * SAMPLE_RATE as u64 + device_rate as u64 - 1) / device_rate as u64) as usize;
 
+            let mut got_some = 0u32;
+            let mut got_none = 0u32;
             while pending.len() < needed_src {
                 match source.next_frame() {
-                    Some(f) => pending.extend_from_slice(&f),
+                    Some(f) => {
+                        got_some += 1;
+                        pending.extend_from_slice(&f);
+                    }
                     None => {
+                        got_none += 1;
                         source.on_underrun();
                         pending.extend(std::iter::repeat(0.0).take(FRAME_SAMPLES));
                     }
                 }
+            }
+
+            render_tick += 1;
+            if render_tick % 100 == 1 {
+                let peak = pending.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                crate::debug::debug_log(&format!(
+                    "RENDER: tick={} some={} none={} pending_peak={:.6} writable={}",
+                    render_tick, got_some, got_none, peak, frames_writable
+                ));
             }
 
             let buf = render_client.GetBuffer(frames_writable)

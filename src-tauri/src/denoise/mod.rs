@@ -5,11 +5,31 @@ use rnnoise::RnnoiseModel;
 use deepfilter::DeepFilterFFI;
 
 /// 降噪模型统一接口
-/// 所有模型约束：480 samples/帧、48kHz、f32 输入输出
+///
+/// ══════════════════════════════════════════════════════════════
+/// 【管线范围约定 — 禁止修改】
+///
+/// 音频管线（capture → DSP → render）全程使用 normalized f32：
+///   范围: [-1.0, 1.0]
+///   采样率: 48kHz
+///   帧大小: 480 samples (10ms)
+///   声道: mono
+///
+/// 每个模型的 process_frame 接收 normalized f32 输入，
+/// 必须输出 normalized f32。
+///
+/// 模型内部需要自行处理范围转换（如 RNNoise 需要 i16 范围）。
+/// 调用方（audio_engine.rs）不需要关心各模型的内部范围。
+///
+/// ⚠️ 不要修改 process_frame 的输入输出范围！
+/// ⚠️ 不要假设管线是 i16 范围！三线程重构后管线已改为 normalized！
+/// ══════════════════════════════════════════════════════════════
 pub trait DenoiseModel: Send {
     /// 模型显示名称
     fn name(&self) -> &str;
     /// 处理一帧音频（480 samples）
+    /// 输入: normalized f32 [-1.0, 1.0]
+    /// 输出: normalized f32 [-1.0, 1.0]
     fn process_frame(&mut self, output: &mut [f32], input: &[f32]);
     /// 保存模型内部状态（归一化统计等），用于切换模型时保持适应性
     fn save_state(&self) -> Option<Vec<u8>> { None }

@@ -441,6 +441,8 @@ fn dsp_thread(
         }
     }
     log::info!("Using denoise model: {}", current_model_name);
+    debug_log(&format!("MODEL: name='{}' requested='{}' resource_dir={:?}",
+        current_model_name, model_name.unwrap_or("RNNoise"), resource_dir.map(|p| p.display().to_string())));
 
     // EQ 初始化
     let mut eq_processor = crate::eq::EqProcessor::new(48000);
@@ -461,13 +463,19 @@ fn dsp_thread(
     let mut last_strength: f32 = -1.0;
     let mut frame_count: u64 = 0;
     let mut frames_dropped: u64 = 0;
-    let mut consecutive_zero_output: u32 = 0;
     let mut bgm_buf: Vec<f32> = Vec::new();
     let mut bgm_read_pos: usize = 0;
     let mut resample_buf: Vec<f32> = vec![0.0; FRAME_SIZE * 2];
     let mut hp_x_prev: f32 = 0.0;
     let mut hp_y_prev: f32 = 0.0;
     let mut stats_start = std::time::Instant::now();
+    let mut gate_open: f32 = 1.0; // 噪声门状态：0.0=关闭，1.0=打开
+
+    // 打印初始配置
+    let init_config = config.read().clone();
+    debug_log(&format!("DSP_INIT: model={} enabled={} strength={} suppress={} mic_gain={} eq={} explode={} bgm={}",
+        current_model_name, init_config.enabled, init_config.strength, init_config.suppress_level, init_config.mic_gain,
+        eq_config.read().enabled, explode_enabled.load(Ordering::Relaxed), bgm_running.load(Ordering::Relaxed)));
 
     while running.load(Ordering::Acquire) {
         // 从 ring A 拉取帧
@@ -515,36 +523,35 @@ fn dsp_thread(
                 if !sample.is_finite() { *sample = 0.0; }
             }
 
-            // 模型损坏检测（normalized f32 范围）
-            let input_peak = input_frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
-            let output_peak = frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
-            if input_peak > 0.03 && output_peak < 0.00003 {
-                consecutive_zero_output += 1;
-                if consecutive_zero_output >= 10 {
-                    log::warn!("Denoise model corrupted, rebuilding");
-                    denoise = denoise::create_model(model_name.unwrap_or("RNNoise"), resource_dir);
-                    eq_processor = crate::eq::EqProcessor::new(48000);
-                    last_eq_config = None;
-                    eq_config_dirty.store(false, Ordering::Release);
-                    let eq_cfg = eq_config.read().clone();
-                    if eq_cfg.enabled {
-                        eq_processor.apply_config(&eq_cfg);
-                        last_eq_config = Some(eq_cfg);
-                    }
-                    consecutive_zero_output = 0;
-                    // 清除损坏的模型状态，防止重启后加载
-                    if let Ok(mut states) = saved_model_states.lock() {
-                        states.remove(&current_model_name);
-                    }
-                }
-            } else {
-                consecutive_zero_output = 0;
+            // 每 500 帧打印一次完整状态
+            if frame_count % 500 == 1 {
+                let in_peak = input_frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
+                let out_peak = frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
+                debug_log(&format!(
+                    "STAGE[model={} strength={} suppress={}]: in={:.6} out={:.6}",
+                    current_model_name, current_config.strength, current_config.suppress_level,
+                    in_peak, out_peak
+                ));
             }
 
             // Strength mixing（normalized 范围）
             if current_config.strength < 1.0 && !denoise.has_internal_strength_control() {
                 for (denoised, &original) in frame.iter_mut().zip(input_frame.iter()) {
                     *denoised = original * (1.0 - current_config.strength) + *denoised * current_config.strength;
+                }
+            }
+
+            // 噪声门（仅 RNNoise，DeepFilterNet3 不需要）
+            if !denoise.has_internal_strength_control() && current_config.suppress_level > 0.01 {
+                let threshold = 0.001 + current_config.suppress_level * 0.009;
+                let frame_rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+                let target = if frame_rms > threshold { 1.0 } else { 0.0 };
+                let speed = if target > gate_open { 0.1 } else { 0.02 };
+                gate_open = gate_open + (target - gate_open) * speed;
+                if gate_open < 0.99 {
+                    for sample in frame.iter_mut() {
+                        *sample *= gate_open;
+                    }
                 }
             }
 
@@ -650,6 +657,7 @@ fn dsp_thread(
         }
 
         // ── 6.5 高通滤波器（80Hz，切除次声波）──
+        let peak_before_hp = frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         {
             const HP_ALPHA: f32 = 0.98953;
             let mut x_prev = hp_x_prev;
@@ -730,6 +738,10 @@ fn dsp_thread(
         }
 
         // ── 9. 推入 ring B ──
+        if frame_count % 100 == 1 {
+            let peak_after = frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+            debug_log(&format!("RING_B_PUSH: frame={} before_hp={:.6} after_hp={:.6}", frame_count, peak_before_hp, peak_after));
+        }
         if prod_b.try_push(frame).is_err() {
             frames_dropped += 1;
         }
