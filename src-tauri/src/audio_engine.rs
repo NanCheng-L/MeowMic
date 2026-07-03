@@ -97,6 +97,12 @@ pub struct AudioEngine {
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     bgm_thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// 模型热切换 channel（发送端，传递已创建好的模型）
+    model_switch_sender: Sender<(String, Box<dyn denoise::DenoiseModel>)>,
+    /// 模型热切换 channel（接收端，传递给 DSP 线程）
+    model_switch_receiver: Receiver<(String, Box<dyn denoise::DenoiseModel>)>,
+    /// 资源目录路径（用于加载模型）
+    resource_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
     app_handle: std::sync::Mutex<Option<AppHandle>>,
     lifecycle_lock: std::sync::Mutex<()>,
 }
@@ -104,6 +110,7 @@ pub struct AudioEngine {
 impl AudioEngine {
     pub fn new(app_handle: Option<AppHandle>) -> Self {
         let (bgm_sender, bgm_receiver) = bounded::<Vec<i16>>(10);
+        let (model_switch_sender, model_switch_receiver) = bounded::<(String, Box<dyn denoise::DenoiseModel>)>(1);
         Self {
             running: Arc::new(AtomicBool::new(false)),
             config: Arc::new(RwLock::new(DenoiseConfig::default())),
@@ -125,6 +132,9 @@ impl AudioEngine {
             thread_handle: std::sync::Mutex::new(None),
             bgm_thread_handle: std::sync::Mutex::new(None),
             model_states: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            model_switch_sender,
+            model_switch_receiver,
+            resource_dir: std::sync::Mutex::new(None),
             app_handle: std::sync::Mutex::new(app_handle),
             lifecycle_lock: std::sync::Mutex::new(()),
         }
@@ -176,6 +186,9 @@ impl AudioEngine {
         }
         self.stop_inner();
 
+        // 保存 resource_dir 供 switch_model 使用
+        *self.resource_dir.lock().unwrap() = resource_dir.clone();
+
         let running = self.running.clone();
         let config = self.config.clone();
         let eq_config = self.eq_config.clone();
@@ -191,6 +204,7 @@ impl AudioEngine {
         let monitor_enabled = self.monitor_enabled.clone();
         let monitor_point = self.monitor_point.clone();
         let saved_model_states = self.model_states.clone();
+        let model_switch_receiver = self.model_switch_receiver.clone();
         let app_handle = self.app_handle.lock().unwrap().clone();
 
         running.store(true, Ordering::Release);
@@ -203,7 +217,7 @@ impl AudioEngine {
                     bgm_running, bgm_gain, bgm_skip_rate, bgm_receiver, bgm_was_active,
                     explode_enabled, explode_state, monitor_enabled, monitor_point,
                     input_device_name, output_device_name, model_name, resource_dir,
-                    saved_model_states, app_handle,
+                    saved_model_states, model_switch_receiver, app_handle,
                 ) {
                     log::error!("Audio loop error: {}", e);
                 }
@@ -241,6 +255,29 @@ impl AudioEngine {
         self.eq_config_dirty.store(true, Ordering::Release);
     }
     pub fn get_eq_config(&self) -> EqConfig { self.eq_config.read().clone() }
+
+    /// 热切换降噪模型（不重启引擎）
+    /// 在后台线程创建新模型，创建完成后发送到 DSP 线程替换
+    pub fn switch_model(&self, model_name: String) -> Result<(), String> {
+        if !self.running.load(Ordering::Acquire) {
+            return Err("Engine is not running".to_string());
+        }
+
+        let sender = self.model_switch_sender.clone();
+        let resource_dir = self.resource_dir.lock().unwrap().clone();
+
+        // 后台线程创建模型，避免阻塞 DSP 线程
+        std::thread::Builder::new()
+            .name("model-loader".into())
+            .spawn(move || {
+                let new_model = denoise::create_model(&model_name, resource_dir.as_deref());
+                // 非阻塞发送，channel 满说明已有切换请求，丢弃本次
+                let _ = sender.try_send((model_name, new_model));
+            })
+            .map_err(|e| format!("Failed to spawn model loader: {}", e))?;
+
+        Ok(())
+    }
 
     pub fn start_bgm(&self, pid: u32) -> Result<(), String> {
         self.stop_bgm();
@@ -342,6 +379,7 @@ fn audio_loop(
     model_name: Option<String>,
     resource_dir: Option<std::path::PathBuf>,
     saved_model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    model_switch_receiver: Receiver<(String, Box<dyn denoise::DenoiseModel>)>,
     app_handle: Option<AppHandle>,
 ) -> Result<(), String> {
     debug_log("audio_loop: starting (three-thread architecture)");
@@ -380,6 +418,7 @@ fn audio_loop(
     let monitor_enabled_dsp = monitor_enabled.clone();
     let monitor_point_dsp = monitor_point.clone();
     let saved_dsp = saved_model_states.clone();
+    let model_switch_receiver_dsp = model_switch_receiver;
     let app_dsp = app_handle.clone();
     let model_name_dsp = current_model_name.clone();
 
@@ -395,7 +434,7 @@ fn audio_loop(
                 explode_enabled_dsp, explode_state_dsp,
                 monitor_enabled_dsp, monitor_point_dsp,
                 denoise, &model_name_dsp,
-                &saved_dsp, &app_dsp,
+                &saved_dsp, model_switch_receiver_dsp, &app_dsp,
             );
         })
         .map_err(|e| format!("Failed to spawn DSP thread: {}", e))?;
@@ -457,11 +496,12 @@ fn dsp_thread(
     mut denoise: Box<dyn denoise::DenoiseModel>,
     current_model_name: &str,
     saved_model_states: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    model_switch_receiver: Receiver<(String, Box<dyn denoise::DenoiseModel>)>,
     _app_handle: &Option<AppHandle>,
 ) {
     debug_log_dev("dsp_thread: started");
 
-    let current_model_name = current_model_name.to_string();
+    let mut current_model_name = current_model_name.to_string();
     debug_log(&format!("DSP thread: model={}", current_model_name));
 
     // EQ 初始化
@@ -503,6 +543,30 @@ fn dsp_thread(
         eq_config.read().enabled, explode_enabled.load(Ordering::Relaxed), bgm_running.load(Ordering::Relaxed)));
 
     while running.load(Ordering::Acquire) {
+        // 检查模型热切换请求（非阻塞，模型已在后台线程创建好）
+        if let Ok((new_model_name, mut new_model)) = model_switch_receiver.try_recv() {
+            debug_log(&format!("MODEL_SWITCH: {} -> {}", current_model_name, new_model_name));
+            // 保存旧模型状态
+            if let Some(state) = denoise.save_state() {
+                if let Ok(mut states) = saved_model_states.lock() {
+                    states.insert(current_model_name.clone(), state);
+                }
+            }
+            // 尝试加载旧模型状态（仅同类型模型兼容）
+            if let Ok(states) = saved_model_states.lock() {
+                if let Some(state) = states.get(&new_model_name) {
+                    new_model.load_state(state);
+                    debug_log(&format!("MODEL_SWITCH: restored state for {}", new_model_name));
+                }
+            }
+            // 应用当前 strength 设置
+            let current_config = config.read().clone();
+            new_model.update_strength(current_config.strength);
+            denoise = new_model;
+            current_model_name = new_model_name.clone();
+            debug_log(&format!("MODEL_SWITCH: now using {}", current_model_name));
+        }
+
         // 从 ring A 拉取帧
         let mut frame = match cons_a.try_pop() {
             Some(f) => f,
@@ -762,7 +826,10 @@ fn dsp_thread(
 
         // ── 9. 推入 ring B ──
         if prod_b.try_push(frame).is_err() {
-            frames_dropped += 1;
+            // 前 100 帧是启动预热期（render 初始化等），不计入丢帧统计
+            if frame_count > 100 {
+                frames_dropped += 1;
+            }
         }
 
         // ── 10. 健康统计 ──

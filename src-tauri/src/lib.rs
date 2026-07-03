@@ -168,6 +168,12 @@ fn update_denoise_config(
 }
 
 #[tauri::command]
+fn switch_model(state: State<'_, EngineState>, model_name: String) -> Result<(), String> {
+    let engine = state.engine.lock();
+    engine.switch_model(model_name)
+}
+
+#[tauri::command]
 fn get_audio_stats(state: State<'_, EngineState>) -> AudioStats {
     let engine = state.engine.lock();
     let stats = engine.stats().read().clone();
@@ -499,6 +505,7 @@ pub fn run() {
             start_denoising,
             stop_denoising,
             update_denoise_config,
+            switch_model,
             get_audio_stats,
             list_input_devices,
             list_output_devices,

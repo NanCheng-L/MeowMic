@@ -396,9 +396,15 @@ const handleModelChange = async (model: string) => {
     await updateConfig({ suppressLevel: 0.0 })
   }
   saveConfig()
-  // 切换模型需要重启引擎
+  // 热切换模型（不重启引擎）
   if (isRunning.value) {
-    scheduleRestart(100)
+    try {
+      await invoke('switch_model', { modelName: model })
+    } catch (e) {
+      console.error('Model switch failed:', e)
+      // 回退到重启引擎
+      scheduleRestart(100)
+    }
   }
 }
 
