@@ -78,8 +78,38 @@ impl DeepFilterFFI {
             let set_post_filter_beta: FnSetPostFilterBeta = *lib.get(b"dfgui_set_post_filter_beta")
                 .map_err(|e| format!("dfgui_set_post_filter_beta not found: {}", e))?;
 
-            // channels=1 (mono), atten_lim_db=100 (不限制), post_filter_beta=0.02, reduce_mask=0 (NONE, 与 GUI 默认一致)
-            let state = create(1, 100.0, 0.02, 0);
+            // ══════════════════════════════════════════════════════════════
+            // DeepFilterNet 初始化参数说明
+            // ══════════════════════════════════════════════════════════════
+            //
+            // 参数 1: channels (usize)
+            //   声道数。1=单声道，2=立体声。
+            //   我们用单声道处理麦克风输入。
+            //
+            // 参数 2: atten_lim_db (f32)
+            //   衰减限制（dB），控制最大降噪深度。
+            //   - >= 100：不限制，最大降噪
+            //   - 50：中等降噪
+            //   - 0：不降噪（直通）
+            //   内部转换公式：lim = 10^(-dB/20)
+            //   用户通过 strength 滑块动态调整此值。
+            //
+            // 参数 3: post_filter_beta (f32)
+            //   后滤波强度，用于抑制降噪后的音乐噪声伪影。
+            //   - 0.0：禁用后滤波
+            //   - 0.02：轻微后滤波（推荐）
+            //   - 0.1：较强后滤波
+            //   过大可能导致语音失真。
+            //
+            // 参数 4: reduce_mask (i32)
+            //   频带掩码合并方式。DeepFilterNet 内部把音频分成多个
+            //   ERB 频带处理，每个频带有独立的降噪掩码。
+            //   - 0 (NONE/Independent)：各频带独立处理，不合并
+            //   - 1 (MAX)：取所有频带掩码的最大值（保守，不易漏噪声）
+            //   - 2 (MEAN)：取所有频带掩码的平均值（更平滑）
+            //   MAX 对瞬态噪声处理更稳定。
+            // ══════════════════════════════════════════════════════════════
+            let state = create(1, 100.0, 0.02, 1);
             if state.is_null() {
                 return Err("dfgui_create returned null".into());
             }
