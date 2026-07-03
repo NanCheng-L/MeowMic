@@ -187,6 +187,10 @@ scripts/                # 构建/发布辅助脚本
 - **debug_log 文件需要 UTF-8 BOM**：`debug_log()` 写入 `%TEMP%\meowmic-debug.log`，新文件必须写入 BOM `[0xEF, 0xBB, 0xBF]`，否则 Windows 用 ANSI/Big5 编码读取导致中文设备名乱码（如"鑰虫満"代替"耳机"）
 - **监听开关必须同步 monitorPoint**：前端 `handleMonitorChange` 开启监听时，必须同时调用 `setMonitorPoint(monitorPoint.value)`。否则 `mon_point` 为 0，监听流不会启动，用户听不到声音
 - **WASAPI 物理设备启动回声**：输出到 Realtek 耳机等物理音频设备时，启动后有 1-2 秒回声然后自动消失。输出到 VB-Cable（虚拟声卡）无此问题。原因未确定，已发 Issue：https://github.com/NanCheng-L/MeowMic/issues/3
+- **DeepFilterNet3 reduce_mask 参数**：`reduce_mask` 控制频带掩码合并方式，0=NONE(Independent)/1=MAX/2=MEAN。MAX 对瞬态噪声（鼠标点击）处理更稳定，推荐用 1
+- **模型热切换**：切换模型不需要重启引擎。AudioEngine 通过 channel 传递 `(String, Box<dyn DenoiseModel>)` 给 DSP 线程，后台线程创建模型避免阻塞音频处理
+- **调试日志分级**：`debug_log_dev()` 仅在 debug 构建（`cfg!(debug_assertions)`）打印，release 构建零开销。生产环境只保留设备配置、健康统计、错误日志
+- **启动丢帧预热期**：DSP 线程前 100 帧的丢帧不计入统计（render 初始化期间 ring B 短暂满溢），启动时显示 0
 
 ## 版本号管理
 
