@@ -4,7 +4,7 @@
 ///
 /// 负责 WASAPI 输入/输出/监听设备的初始化和配置。
 
-use crate::debug::debug_log;
+use crate::debug::{debug_log, debug_log_dev};
 use crate::device::find_device;
 use wasapi::*;
 
@@ -286,14 +286,14 @@ pub fn warmup_streams(
     input_bytes_per_frame: usize,
     frame_size: usize,
 ) {
-    debug_log("Starting warmup...");
+    debug_log_dev("Starting warmup...");
     let warmup_buf_size = frame_size * input_bytes_per_frame;
     let mut warmup_buf = vec![0u8; warmup_buf_size];
     let max_retries = 3;
     let mut warmup_ok = false;
 
     for attempt in 0..max_retries {
-        debug_log(&format!("Warmup attempt {}/{}", attempt + 1, max_retries));
+        debug_log_dev(&format!("Warmup attempt {}/{}", attempt + 1, max_retries));
         let warmup_start = std::time::Instant::now();
         let mut warmup_frames = 0;
         let mut got_signal = false;
@@ -314,7 +314,7 @@ pub fn warmup_streams(
         }
 
         if got_signal {
-            debug_log(&format!(
+            debug_log_dev(&format!(
                 "Warmup OK: {} frames, {}ms",
                 warmup_frames,
                 warmup_start.elapsed().as_millis()
@@ -323,7 +323,7 @@ pub fn warmup_streams(
             break;
         }
 
-        debug_log(&format!(
+        debug_log_dev(&format!(
             "Warmup attempt {} failed, restarting streams...",
             attempt + 1
         ));
@@ -333,7 +333,7 @@ pub fn warmup_streams(
     }
 
     if !warmup_ok {
-        debug_log("All warmup attempts failed!");
+        debug_log_dev("All warmup attempts failed!");
     }
-    debug_log("Entering main audio loop");
+    debug_log_dev("Entering main audio loop");
 }

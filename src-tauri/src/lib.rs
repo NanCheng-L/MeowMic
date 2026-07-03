@@ -366,23 +366,23 @@ fn list_audio_processes(state: State<'_, EngineState>) -> Result<Vec<(String, St
 
 #[tauri::command]
 fn start_bgm(state: State<'_, EngineState>, pids: Vec<u32>) -> Result<(), String> {
-    debug::debug_log("lib: start_bgm command received, locking engine...");
+    debug::debug_log_dev("lib: start_bgm command received, locking engine...");
     let engine = state.engine.lock();
-    debug::debug_log("lib: start_bgm engine locked, calling start_bgm...");
+    debug::debug_log_dev("lib: start_bgm engine locked, calling start_bgm...");
     let result = engine.start_bgm(pids[0]);
-    debug::debug_log("lib: start_bgm done");
+    debug::debug_log_dev("lib: start_bgm done");
     result
 }
 
 #[tauri::command]
 fn stop_bgm(state: State<'_, EngineState>) -> Result<(), String> {
-    debug::debug_log("lib: stop_bgm command received, locking engine...");
+    debug::debug_log_dev("lib: stop_bgm command received, locking engine...");
     let engine = state.engine.lock();
-    debug::debug_log("lib: stop_bgm engine locked, calling stop_bgm...");
+    debug::debug_log_dev("lib: stop_bgm engine locked, calling stop_bgm...");
     engine.stop_bgm();
     // 用户手动停止 BGM，取消引擎重启后的自动恢复
     engine.cancel_bgm_auto_restart();
-    debug::debug_log("lib: stop_bgm done");
+    debug::debug_log_dev("lib: stop_bgm done");
     Ok(())
 }
 

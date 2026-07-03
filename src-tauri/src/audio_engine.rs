@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
-use crate::debug::{debug_log, flush_debug_log};
+use crate::debug::{debug_log, debug_log_dev, flush_debug_log};
 use crate::audio_utils::{calculate_rms, compute_spectrum_into, write_to_monitor};
 
 /// Ring buffer 帧容量：8 帧 ≈ 80ms headroom（参考 noisegate）
@@ -407,7 +407,7 @@ fn audio_loop(
     impl wasapi_capture::FrameSink for CaptureSink {
         fn on_frame(&mut self, frame: &Frame) {
             if self.prod.try_push(*frame).is_err() {
-                debug_log("capture: ring A full, dropping frame");
+                debug_log_dev("capture: ring A full, dropping frame");
             }
         }
     }
@@ -459,7 +459,7 @@ fn dsp_thread(
     saved_model_states: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     _app_handle: &Option<AppHandle>,
 ) {
-    debug_log("dsp_thread: started");
+    debug_log_dev("dsp_thread: started");
 
     let current_model_name = current_model_name.to_string();
     debug_log(&format!("DSP thread: model={}", current_model_name));
@@ -546,11 +546,11 @@ fn dsp_thread(
                 if !sample.is_finite() { *sample = 0.0; }
             }
 
-            // 每 500 帧打印一次完整状态
+            // 每 500 帧打印一次完整状态（仅开发环境）
             if frame_count % 500 == 1 {
                 let in_peak = input_frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
                 let out_peak = frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
-                debug_log(&format!(
+                debug_log_dev(&format!(
                     "STAGE[model={} strength={} suppress={}]: in={:.6} out={:.6}",
                     current_model_name, current_config.strength, current_config.suppress_level,
                     in_peak, out_peak
@@ -674,7 +674,6 @@ fn dsp_thread(
         }
 
         // ── 6.5 高通滤波器（80Hz，切除次声波）──
-        let peak_before_hp = frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         {
             const HP_ALPHA: f32 = 0.98953;
             let mut x_prev = hp_x_prev;
@@ -701,14 +700,14 @@ fn dsp_thread(
             if !mon_was_enabled {
                 monitor = init_monitor(&String::new(), 48000, FRAME_SIZE);
                 mon_was_enabled = true;
-                debug_log("Monitor: initialized");
+                debug_log_dev("Monitor: initialized");
             }
             if !monitor.was_streaming && mon_point > 0 {
                 if let Some(ref mut m_client) = monitor.client {
                     match m_client.start_stream() {
                         Ok(()) => {
                             monitor.was_streaming = true;
-                            debug_log(&format!("Monitor: started streaming at point {}", mon_point));
+                            debug_log_dev(&format!("Monitor: started streaming at point {}", mon_point));
                         }
                         Err(e) => {
                             debug_log(&format!("Monitor: start_stream FAILED: {:?}", e));
@@ -720,7 +719,7 @@ fn dsp_thread(
             if monitor.was_streaming {
                 if let Some(ref mut m_client) = monitor.client {
                     let _ = m_client.stop_stream();
-                    debug_log("Monitor: stopped streaming");
+                    debug_log_dev("Monitor: stopped streaming");
                 }
                 monitor.was_streaming = false;
             }
@@ -762,10 +761,6 @@ fn dsp_thread(
         }
 
         // ── 9. 推入 ring B ──
-        if frame_count % 100 == 1 {
-            let peak_after = frame.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-            debug_log(&format!("RING_B_PUSH: frame={} before_hp={:.6} after_hp={:.6}", frame_count, peak_before_hp, peak_after));
-        }
         if prod_b.try_push(frame).is_err() {
             frames_dropped += 1;
         }

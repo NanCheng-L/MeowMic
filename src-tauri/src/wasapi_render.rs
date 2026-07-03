@@ -85,7 +85,7 @@ fn render_loop(
                 Ok(d) => d,
                 Err(_) => {
                     // 枚举渲染设备，按友好名称匹配
-                    crate::debug::debug_log(&format!("RENDER: GetDevice failed for '{}', enumerating...", device_id));
+                    crate::debug::debug_log_dev(&format!("RENDER: GetDevice failed for '{}', enumerating...", device_id));
                     let collection = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
                         .map_err(|e| format!("EnumAudioEndpoints: {}", e))?;
                     let count = collection.GetCount()
@@ -97,7 +97,7 @@ fn render_loop(
                                 if let Ok(name_var) = props.GetValue(&windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName) {
                                     let name = name_var.to_string();
                                     if name == device_id {
-                                        crate::debug::debug_log(&format!("RENDER: matched device '{}' at index {}", name, i));
+                                        crate::debug::debug_log_dev(&format!("RENDER: matched device '{}' at index {}", name, i));
                                         found = Some(dev);
                                         break;
                                     }
@@ -108,7 +108,7 @@ fn render_loop(
                     match found {
                         Some(d) => d,
                         None => {
-                            crate::debug::debug_log(&format!("RENDER: device '{}' not found in enumeration, using default", device_id));
+                            crate::debug::debug_log_dev(&format!("RENDER: device '{}' not found in enumeration, using default", device_id));
                             enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
                                 .map_err(|e| format!("GetDefaultAudioEndpoint fallback: {}", e))?
                         }
@@ -215,7 +215,7 @@ fn render_loop(
             render_tick += 1;
             if render_tick % 100 == 1 {
                 let peak = pending.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                crate::debug::debug_log(&format!(
+                crate::debug::debug_log_dev(&format!(
                     "RENDER: tick={} some={} none={} pending_peak={:.6} writable={}",
                     render_tick, got_some, got_none, peak, frames_writable
                 ));
