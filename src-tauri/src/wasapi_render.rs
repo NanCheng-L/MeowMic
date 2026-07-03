@@ -156,7 +156,15 @@ fn render_loop(
         let buffer_frames = client.GetBufferSize()
             .map_err(|e| format!("GetBufferSize: {}", e))?;
 
+        crate::debug::debug_log(&format!(
+            "RENDER_BUFFER: device='{}' buffer_frames={} period_ms={:.1}",
+            device_id, buffer_frames, buffer_frames as f64 / device_rate as f64 * 1000.0
+        ));
+
         let _mmcss = ProAudio::set_for_current_thread();
+
+        // Reset 清空所有缓冲区（包括硬件缓冲区残留数据），防止启动时回声
+        let _ = client.Reset();
 
         // 预填充静音，避免启动时欠载
         let prefill = render_client.GetBuffer(buffer_frames)

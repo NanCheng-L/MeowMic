@@ -42,15 +42,12 @@ pub fn write_to_monitor(
     render_opt: &Option<AudioRenderClient>,
     event_opt: &Option<wasapi::Handle>,
     monitor_buffer: &mut [u8],
-    monitor_sample_rate: u32,
-    resample_buf: &mut [f32],
+    _monitor_sample_rate: u32,
+    _resample_buf: &mut [f32],
 ) {
     let render = match render_opt {
         Some(r) => r,
-        None => {
-            crate::debug::debug_log("write_to_monitor: render is None");
-            return;
-        }
+        None => return,
     };
 
     // 等待设备事件（非阻塞，2ms 超时）
@@ -58,37 +55,33 @@ pub fn write_to_monitor(
         let _ = evt.wait_for_event(2);
     }
 
-    // 重采样到监听设备采样率
-    let frames = if monitor_sample_rate != 48000 {
-        resample_in_place(samples, 48000, monitor_sample_rate, resample_buf)
-    } else {
-        let len = samples.len().min(resample_buf.len());
-        resample_buf[..len].copy_from_slice(&samples[..len]);
-        len
-    };
-
-    let stereo_bytes = frames * 4;
-    if stereo_bytes > monitor_buffer.len() {
+    // 设备原生格式是 f32 stereo，直接写入（和 render 一样）
+    let frames = samples.len();
+    let stereo_f32_bytes = frames * 2 * 4; // stereo f32
+    if stereo_f32_bytes > monitor_buffer.len() {
         return;
     }
 
-    // 单声道 → 立体声 + normalized f32 → i16
+    // mono f32 → stereo f32
     for i in 0..frames {
-        let val = (resample_buf[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        let val = samples[i];
         let bytes = val.to_le_bytes();
-        let pos = i * 4;
-        if pos + 4 <= monitor_buffer.len() {
+        let pos = i * 8; // 2 channels * 4 bytes
+        if pos + 8 <= monitor_buffer.len() {
+            // left channel
             monitor_buffer[pos] = bytes[0];
             monitor_buffer[pos + 1] = bytes[1];
-            monitor_buffer[pos + 2] = bytes[0];
-            monitor_buffer[pos + 3] = bytes[1];
+            monitor_buffer[pos + 2] = bytes[2];
+            monitor_buffer[pos + 3] = bytes[3];
+            // right channel
+            monitor_buffer[pos + 4] = bytes[0];
+            monitor_buffer[pos + 5] = bytes[1];
+            monitor_buffer[pos + 6] = bytes[2];
+            monitor_buffer[pos + 7] = bytes[3];
         }
     }
-    match render.write_to_device(frames, &monitor_buffer[..stereo_bytes], None) {
-        Ok(()) => {}
-        Err(e) => {
-            crate::debug::debug_log(&format!("Monitor write_to_device FAILED: frames={} err={:?}", frames, e));
-        }
+    if let Err(e) = render.write_to_device(frames, &monitor_buffer[..stereo_f32_bytes], None) {
+        crate::debug::debug_log(&format!("Monitor write FAILED: frames={} err={:?}", frames, e));
     }
 }
 

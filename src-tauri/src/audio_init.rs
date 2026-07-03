@@ -209,19 +209,19 @@ pub fn init_monitor(
             }
 
             if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
-                let device_sample_rate = m_client
-                    .get_mixformat()
-                    .map(|f| f.get_samplespersec())
-                    .unwrap_or(48000);
-                let monitor_format =
-                    WaveFormat::new(16, 16, &SampleType::Int, device_sample_rate as usize, 2, None);
+                // 使用设备原生格式（和 render 一样），不用 autoconvert
+                let monitor_format = m_client.get_mixformat().unwrap_or_else(|_| {
+                    WaveFormat::new(16, 16, &SampleType::Int, 48000, 2, None)
+                });
+                let device_sample_rate = monitor_format.get_samplespersec();
                 let (def_time, _) = m_client.get_device_period().unwrap_or((0, 0));
                 debug_log(&format!(
                     "Monitor: initializing client on '{}' ({}Hz, format={:?})",
                     device_name, device_sample_rate, monitor_format
                 ));
+                // 不用 autoconvert，和 render 一致
                 let monitor_mode = StreamMode::EventsShared {
-                    autoconvert: true,
+                    autoconvert: false,
                     buffer_duration_hns: def_time,
                 };
                 if m_client
@@ -230,15 +230,24 @@ pub fn init_monitor(
                 {
                     if let Ok(render) = m_client.get_audiorenderclient() {
                         let evt = m_client.set_get_eventhandle();
+
+                        // 预填充静音（在 start_stream 之前！和 render 一样）
+                        let buf_size = m_client.get_buffer_size().unwrap_or(0);
+                        let frame_bytes = monitor_format.get_bitspersample() as usize / 8 * monitor_format.get_nchannels() as usize;
+                        let silent = vec![0u8; buf_size as usize * frame_bytes];
+                        let _ = render.write_to_device(buf_size as usize, &silent, None);
+                        debug_log(&format!("Monitor: prefilled {} silent frames ({} bytes)", buf_size, silent.len()));
+
                         log::info!(
-                            "Monitor client ready on '{}' (format: {}bit, {}Hz)",
+                            "Monitor client ready on '{}' (format: {}bit, {}Hz, buffer={})",
                             device_name,
                             monitor_format.get_bitspersample(),
-                            device_sample_rate
+                            device_sample_rate,
+                            buf_size
                         );
                         debug_log(&format!(
-                            "Monitor: READY on '{}' ({}Hz, render_ok={}, evt_ok={})",
-                            device_name, device_sample_rate, true, evt.is_ok()
+                            "Monitor: READY on '{}' ({}Hz, render_ok={}, evt_ok={}, buffer={})",
+                            device_name, device_sample_rate, true, evt.is_ok(), buf_size
                         ));
                         state.client = Some(m_client);
                         state.render = Some(render);
@@ -247,7 +256,7 @@ pub fn init_monitor(
                         state.sample_rate = device_sample_rate;
                         // 按监听设备实际采样率重新分配 buffer（可能与 output_sample_rate 不同）
                         let monitor_max_frames = frame_size * (device_sample_rate as usize / 48000 + 1);
-                        state.buffer = vec![0u8; monitor_max_frames * 2 * 2];
+                        state.buffer = vec![0u8; monitor_max_frames * 2 * 4]; // stereo f32
                     } else {
                         debug_log(&format!("Monitor: failed to get render client on '{}'", device_name));
                     }

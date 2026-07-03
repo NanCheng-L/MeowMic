@@ -17,26 +17,25 @@
 
 ## 音频线程架构（三线程解耦）
 
-音频引擎使用三线程架构，解决游戏等高 CPU 负载场景下的颤音问题：
+音频引擎使用三线程架构（参考 noisegate-ref），解决游戏等高 CPU 负载场景下的颤音问题：
 
 ```
-输入线程 (audio_loop 主线程)
-  │ WASAPI input event → read_from_device → process_input
-  │ crossbeam bounded(10) channel
+Capture 线程 (wasapi_capture.rs, windows crate)
+  │ WASAPI event → GetBuffer → downmix/resample → 推入 Ring A
   ▼
-处理线程 (audio_loop 主线程，与输入同线程)
-  │ denoise → strength → gain → EQ → explode → BGM mix → limiter
-  │ crossbeam bounded(10) channel
+DSP 线程 (audio_engine.rs::dsp_thread)
+  │ Ring A → denoise → strength → gain → EQ → explode → BGM mix → limiter → 推入 Ring B + Ring M
   ▼
-输出线程 (独立线程，THREAD_PRIORITY_TIME_CRITICAL)
-  │ get_available_space → write_to_device → wait_event（按 wasapi-rs 官方 playsine 示例）
-  │ crossbeam bounded(10) channel + return channel（Vec 回收）
-  │ 无数据时写满静音，溢出时丢弃
+Render 线程 (wasapi_render.rs, windows crate)
+  │ Ring B → GetBuffer → upmix/resample → ReleaseBuffer → VB-Cable
+  ▼
+Monitor Render 线程 (wasapi_render.rs, 同 render 代码路径)
+  │ Ring M → 耳机（监听，仅在用户开启时推入数据）
 ```
 
-- **输出线程**独立驱动 WASAPI 时钟，不受处理延迟影响
-- `OutputResources` 结构体封装 `AudioClient + AudioRenderClient + wasapi::Handle`，通过 `unsafe impl Send` 跨线程传递
-- BGM 漂移补偿由输出线程根据 `output_buf` 水位计算，写入 `bgm_skip_rate` AtomicU32
+- **启动顺序**：DSP → capture → render（和 noisegate-ref 一致）
+- **模型预加载**：模型在主线程加载完再启动 DSP 线程，避免启动时原始音频直通产生回声
+- **监听**：用独立 WasapiRender 线程（和主 render 完全一样的代码路径），不用 wasapi crate
 - **虚拟音频设备**：VB-Audio Virtual Cable
 - **全局快捷键**：tauri-plugin-global-shortcut
 - **配置持久化**：tauri-plugin-store
@@ -63,9 +62,8 @@ src/                    # Vue 前端
   tutorial-main.ts      # 教程窗口入口
   eq-main.ts            # 均衡器窗口入口
 src-tauri/src/          # Rust 后端
-  audio_engine.rs       # WASAPI 音频引擎（主循环 + 输出线程 + 配置结构体）
+  audio_engine.rs       # WASAPI 音频引擎（三线程架构 + DSP 处理 + 配置结构体）
   audio_init.rs         # 音频设备初始化（输入/输出/监听 WASAPI 客户端配置）
-  audio_process.rs      # 帧处理（降噪→增益→EQ→爆炸→BGM混音→限幅）
   audio_utils.rs        # 音频工具函数（格式转换、重采样、监听写入）
   bgm.rs                # BGM 进程捕获（WASAPI Loopback）
   debug.rs              # 调试日志（%TEMP%\meowmic-debug.log）
@@ -183,6 +181,12 @@ scripts/                # 构建/发布辅助脚本
 - **丢帧计数预热期**：启动前 1000 帧（约 10 秒）不计入丢帧计数，跳过 WASAPI 初始化、模型加载、EQ 配置等延迟
 - **debug_log try_lock**：音频线程用 `Mutex::try_lock()` 而非 `lock()`，拿不到锁就丢弃日志，避免阻塞。BufWriter 8KB 缓冲区满时同步磁盘 I/O 会阻塞数毫秒
 - **AudioStats.spectrum 不用 Vec**：`[f32; 32].to_vec()` 每 5 帧堆分配 128 字节，长期运行导致堆碎片化。改为 `[f32; 32]` 固定数组 + `copy_from_slice()`
+- **模型必须在主线程预加载**：`denoise::create_model()` 必须在 `audio_loop` 中、spawn DSP 线程之前调用。在 DSP 线程内部加载模型会导致启动时原始音频直通产生回声（模型加载期间 capture 帧堆积，DSP 开始处理后时序混乱）。参考 noisegate-ref：模型在主线程加载完再启动管线
+- **启动顺序 DSP → capture → render**：必须和 noisegate-ref 一致。先启动 render 会导致预填充静音后等待时间过长，先启动 capture 会导致帧堆积。DSP 线程先 spawn 并等待数据，capture 启动后立即被消费
+- **监听用独立 render 线程**：监听功能用第二个 `WasapiRender` 线程（和主 render 完全一样的 `windows` crate 代码路径），不用 `wasapi` crate 的 `write_to_device`。DSP 线程把帧推入独立的 ring M，监听 render 线程从 ring M 拉取。避免 `wasapi` crate 和 `windows` crate 混用导致的缓冲区管理不一致
+- **debug_log 文件需要 UTF-8 BOM**：`debug_log()` 写入 `%TEMP%\meowmic-debug.log`，新文件必须写入 BOM `[0xEF, 0xBB, 0xBF]`，否则 Windows 用 ANSI/Big5 编码读取导致中文设备名乱码（如"鑰虫満"代替"耳机"）
+- **监听开关必须同步 monitorPoint**：前端 `handleMonitorChange` 开启监听时，必须同时调用 `setMonitorPoint(monitorPoint.value)`。否则 `mon_point` 为 0，监听流不会启动，用户听不到声音
+- **WASAPI 物理设备启动回声**：输出到 Realtek 耳机等物理音频设备时，启动后有 1-2 秒回声然后自动消失。输出到 VB-Cable（虚拟声卡）无此问题。原因未确定，已发 Issue：https://github.com/NanCheng-L/MeowMic/issues/3
 
 ## 版本号管理
 
