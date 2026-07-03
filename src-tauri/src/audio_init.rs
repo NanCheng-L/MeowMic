@@ -45,8 +45,8 @@ pub fn init_audio_devices(
 
     let input_friendly = input_device.get_friendlyname().unwrap_or_else(|_| "unknown".into());
     let output_friendly = output_device.get_friendlyname().unwrap_or_else(|_| "unknown".into());
-    debug_log(&format!("Input device: '{}'", input_friendly));
-    debug_log(&format!("Output device: '{}'", output_friendly));
+    debug_log(&format!("Input device: '{}' id='{}'", input_friendly, input_device.get_id().unwrap_or_default()));
+    debug_log(&format!("Output device: '{}' id='{}'", output_friendly, output_device.get_id().unwrap_or_default()));
     log::info!("Input device: '{}'", input_friendly);
     log::info!("Output device: '{}'", output_friendly);
 
@@ -171,11 +171,9 @@ pub fn init_monitor(
     ));
     match find_device(None, false) {
         Ok(monitor_output) => {
-            let monitor_output_name = monitor_output.get_friendlyname().unwrap_or_default();
-            debug_log(&format!("Monitor: default output = '{}'", monitor_output_name));
-
             let device_id = monitor_output.get_id().unwrap_or_default();
             let device_name = monitor_output.get_friendlyname().unwrap_or_default();
+            debug_log(&format!("Monitor: default output = '{}' id='{}'", device_name, device_id));
 
             // 检查同 USB 设备冲突
             let extract_usb_id = |id: &str| -> String {

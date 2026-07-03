@@ -136,6 +136,7 @@ scripts/                # 构建/发布辅助脚本
 - **EQ frequencies 拖拽恢复**：EqPage.vue 的 `frequencies` 数组（10 段频率位置）支持水平拖拽修改，但 `bands`（增益值）按索引对应频率。切预设时必须重置 `frequencies` 为默认值 `[20, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000]`，否则预设的 bands 增益会画在错误的频率位置上
 - **WASAPI IAudioSessionManager2**：枚举音频会话需要 `Win32_System_Com` + `Win32_Media_Audio` feature；活跃会话始终显示，非活跃会话仅保留映射表中的已知播放器（避免系统进程如 audiodg 出现）；同名进程按名称去重
 - **WASAPI 输出编码格式**：输出编码必须用**输出设备**的 format（`output_bits` / `output_sample_type`），不能用输入设备的。VB-Audio Cable 通常是 32-bit float，麦克风通常是 16-bit int，混用会导致字节错位产生破音
+- **WASAPI render 设备查找**：`GetDevice(PCWSTR)` 需要设备 ID（`{0.0.0.00000000}.{guid}`），但前端传的是友好名称（如 "CABLE Input (VB-Audio Virtual Cable)"）。直接调用会失败回退到默认设备。解决：失败时枚举 `EnumAudioEndpoints` 按友好名称匹配，需要 `Win32_UI_Shell_PropertiesSystem` feature 访问 `PKEY_Device_FriendlyName`
 - **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`
 - **Soft limiter 阈值与压缩比**：阈值不能太高（28000 太接近 0dBFS），压缩比不能太温和（0.2 即 5:1 仍可能输出 30000+）。推荐阈值 24000、压缩比 0.1（10:1）、硬上限 30000
 - **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏
@@ -153,7 +154,7 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI 输出 padding 跳帧**：当缓冲区 > 20ms 时跳过写入会导致可听到的卡顿。应始终写入，让 WASAPI 处理背压。跳过帧 = 音频间隙 = 卡麦
 - **WASAPI 输出线程循环顺序**：必须按 wasapi-rs 官方 `playsine` 示例的顺序：`get_available_space → write_to_device → wait_event`。不能先 `wait_event` 再写——空缓冲区时事件不会触发，导致死锁。首次 `get_available_space` 返回整个缓冲区大小，自然填满，不需要预填充
 - **EQ 后缺少 NaN/Inf 检查**：Biquad IIR 滤波器在极端参数下可能输出 NaN/Inf，穿透 BGM 混音污染输出。必须在 EQ 处理后添加 `is_finite()` 检查
-- **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。必须在每帧检测：输入有信号（>1000）但降噪输出全零（<1）连续 10 帧时，重建模型并清除 `saved_model_states`。阈值不能太低（如 >100/3 帧），正常键盘鼠标声被正确降噪时会被误判为模型损坏
+- **RNNoise 模型被回声打废**：回声反馈导致输入能量飙升（>1000），RNNoise 内部归一化统计被污染后会将正常语音全部压制为 0，且损坏状态会被 `save_state()` 保存后下次启动又加载。注意：模型损坏检测/自动重建逻辑已移除（会误判正常安静帧为损坏导致永久绕过），如遇模型损坏需用户手动重启应用
 - **Tauri 托盘左键点击**：`TrayIconBuilder` 默认左键也会弹右键菜单。用 `.show_menu_on_left_click(false)` 禁止左键弹菜单，配合 `.on_tray_icon_event` 处理左键单击打开主窗口
 - **BGM 自动恢复标记**：`bgm_was_active` 必须在 `start_bgm()` 中设为 `true`，在 `stop_bgm()` 中也设为 `true`（记录用户主动开启的状态），在 `cancel_bgm_auto_restart()` 中设为 `false`（用户手动停止 BGM）。`start()` 检查 `bgm_was_active.swap(false)` 后自动重启 BGM。如果 `start_bgm()` 不设置此标记，引擎重启后 BGM 永远不会恢复
 - **std::sync::Mutex 中毒防护**：`app_handle`、`thread_handle`、`bgm_thread_handle` 的 `.lock().unwrap()` 必须改为 `.lock().unwrap_or_else(|e| e.into_inner())`，与 `lifecycle_lock` 保持一致。否则任何线程 panic 持有锁后，所有后续 lock 调用都会 panic，导致级联崩溃
@@ -165,7 +166,7 @@ scripts/                # 构建/发布辅助脚本
 - **BGM buffer 无条件 drain**：`audio_loop` 中消费 BGM 样本的 `bgm_buf.drain()` 必须在 `bgm_running` 为 true 时才执行。否则 BGM 关闭/重启期间，drain 会丢弃 channel 中残余的有效数据，导致 BGM 恢复时出现音频断裂
 - **Vue watcher 启动时序**：`onMounted` 中 `loadConfig()` 设置 ref 值会触发 watcher，但此时引擎可能尚未启动。watcher 中调用 `updateConfig()` 发送 invoke 到未运行的后端会产生未处理的 Promise rejection。必须加 `initialized` 守卫
 - **bgm_was_active 设置时机**：`bgm_was_active.store(true)` 必须在线程全部 spawn 成功后执行，不能在 spawn 前。否则任何 spawn 失败导致 `start_bgm` 返回 `Err` 后，标记残留为 true，下次引擎重启会反复尝试重启失败的 BGM
-- **DeepFilterNet 输入范围**：DLL 期望 [-1.0, 1.0] 标准化音频，但我们的管线使用 i16 范围 [-32768, 32767]。必须在 `process_frame` 中除以 32768 归一化后传入 DLL，输出再乘以 32768 还原。同时 `has_internal_strength_control()` 返回 true 避免外部 strength mixing 双重衰减
+- **DeepFilterNet 输入范围**：DLL 期望 normalized f32 [-1.0, 1.0]。三线程重构后管线已是 normalized f32，直接传入 DLL 即可，不需要缩放。`has_internal_strength_control()` 返回 true 避免外部 strength mixing 双重衰减。⚠️ 不要加 `*32768` 缩放，DLL 期望的是 normalized 不是 i16 范围
 - **DeepFilterNet reduce_mask**：DLL 的 `reduce_mask` 参数 0=NONE(Independent), 1=MAX, 2=MEAN。GUI 默认用 0，不要传 2
 - **nnnoiseless 输入范围**：RNNoise 期望 i16 范围 [-32768, 32767]，内部静音阈值按此校准。归一化到 [-1, 1] 会导致所有帧被判定为静音直接跳过，完全丧失降噪能力
 - **爆炸模式 dual-flag**：`explode_enabled`（AudioEngine 控制是否调用 `process_explode_into`）和 `explode_state.enabled`（ExplodeState 内部控制是否实际处理）是两个独立 flag。`set_explode_mode()` 必须同时同步两者，否则爆炸效果被跳过但调用链正常执行，表现为"开关打开了但没效果"

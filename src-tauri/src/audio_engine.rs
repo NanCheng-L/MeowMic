@@ -19,6 +19,22 @@ use crate::audio_utils::{calculate_rms, compute_spectrum_into, write_to_monitor}
 /// Ring buffer 帧容量：8 帧 ≈ 80ms headroom（参考 noisegate）
 const RING_FRAMES: usize = 8;
 
+/// 监听点写入宏：检查条件后写入监听设备
+macro_rules! monitor_write {
+    ($monitor:expr, $target:expr, $current:expr, $enabled:expr, $samples:expr, $resample:expr) => {
+        if $enabled && $current == $target && $monitor.was_streaming && $monitor.render.is_some() {
+            write_to_monitor(
+                $samples,
+                &$monitor.render,
+                &$monitor.event,
+                &mut $monitor.buffer,
+                $monitor.sample_rate,
+                $resample,
+            );
+        }
+    };
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenoiseConfig {
     pub enabled: bool,
@@ -333,37 +349,24 @@ fn audio_loop(
     let input_id = input_device_name.unwrap_or_default();
     let output_id = output_device_name.unwrap_or_default();
 
+    // ── 在主线程预加载模型（参考 noisegate-ref）──
+    let mut denoise = denoise::create_model(model_name.as_deref().unwrap_or("RNNoise"), resource_dir.as_deref());
+    let current_model_name = denoise.name().to_string();
+    if let Ok(states_lock) = saved_model_states.lock() {
+        if let Some(state) = states_lock.get(&current_model_name) {
+            log::info!("Restoring model '{}' state ({} bytes)", current_model_name, state.len());
+            denoise.load_state(state);
+        }
+    }
+    log::info!("Using denoise model: {}", current_model_name);
+
     // ── 创建 ring buffers ──
     let (prod_a, cons_a) = HeapRb::<Frame>::new(RING_FRAMES).split();
     let (prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
-    // ── 启动 render 线程 ──
-    struct RenderSource {
-        cons: ringbuf::CachingCons<Arc<HeapRb<Frame>>>,
-    }
-    impl wasapi_render::FrameSource for RenderSource {
-        fn next_frame(&mut self) -> Option<Frame> { self.cons.try_pop() }
-    }
-    let render = wasapi_render::WasapiRender::start(
-        &output_id, Box::new(RenderSource { cons: cons_b }),
-    ).map_err(|e| format!("Failed to start render: {}", e))?;
+    // ── 启动顺序：DSP → capture → render ──
 
-    // ── 启动 capture 线程 ──
-    struct CaptureSink {
-        prod: ringbuf::CachingProd<Arc<HeapRb<Frame>>>,
-    }
-    impl wasapi_capture::FrameSink for CaptureSink {
-        fn on_frame(&mut self, frame: &Frame) {
-            if self.prod.try_push(*frame).is_err() {
-                debug_log("capture: ring A full, dropping frame");
-            }
-        }
-    }
-    let capture = wasapi_capture::WasapiCapture::start(
-        &input_id, Box::new(CaptureSink { prod: prod_a }),
-    ).map_err(|e| format!("Failed to start capture: {}", e))?;
-
-    // ── 启动 DSP 线程 ──
+    // ── 1. 启动 DSP 线程（模型已预加载）──
     let running_dsp = running.clone();
     let config_dsp = config.clone();
     let eq_config_dsp = eq_config.clone();
@@ -378,6 +381,7 @@ fn audio_loop(
     let monitor_point_dsp = monitor_point.clone();
     let saved_dsp = saved_model_states.clone();
     let app_dsp = app_handle.clone();
+    let model_name_dsp = current_model_name.clone();
 
     let dsp_handle = std::thread::Builder::new()
         .name("audio-dsp".into())
@@ -390,11 +394,37 @@ fn audio_loop(
                 bgm_running_dsp, bgm_gain_dsp, bgm_receiver_dsp,
                 explode_enabled_dsp, explode_state_dsp,
                 monitor_enabled_dsp, monitor_point_dsp,
-                model_name.as_deref(), resource_dir.as_deref(),
+                denoise, &model_name_dsp,
                 &saved_dsp, &app_dsp,
             );
         })
         .map_err(|e| format!("Failed to spawn DSP thread: {}", e))?;
+
+    // ── 2. 启动 capture 线程 ──
+    struct CaptureSink {
+        prod: ringbuf::CachingProd<Arc<HeapRb<Frame>>>,
+    }
+    impl wasapi_capture::FrameSink for CaptureSink {
+        fn on_frame(&mut self, frame: &Frame) {
+            if self.prod.try_push(*frame).is_err() {
+                debug_log("capture: ring A full, dropping frame");
+            }
+        }
+    }
+    let capture = wasapi_capture::WasapiCapture::start(
+        &input_id, Box::new(CaptureSink { prod: prod_a }),
+    ).map_err(|e| format!("Failed to start capture: {}", e))?;
+
+    // ── 3. 启动 render 线程 ──
+    struct RenderSource {
+        cons: ringbuf::CachingCons<Arc<HeapRb<Frame>>>,
+    }
+    impl wasapi_render::FrameSource for RenderSource {
+        fn next_frame(&mut self) -> Option<Frame> { self.cons.try_pop() }
+    }
+    let render = wasapi_render::WasapiRender::start(
+        &output_id, Box::new(RenderSource { cons: cons_b }),
+    ).map_err(|e| format!("Failed to start render: {}", e))?;
 
     // ── 主线程等待退出 ──
     let _ = dsp_handle.join();
@@ -424,25 +454,15 @@ fn dsp_thread(
     explode_state: Arc<ExplodeState>,
     monitor_enabled: Arc<AtomicBool>,
     monitor_point: Arc<AtomicU32>,
-    model_name: Option<&str>,
-    resource_dir: Option<&std::path::Path>,
+    mut denoise: Box<dyn denoise::DenoiseModel>,
+    current_model_name: &str,
     saved_model_states: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
     _app_handle: &Option<AppHandle>,
 ) {
     debug_log("dsp_thread: started");
 
-    // 加载模型
-    let mut denoise = denoise::create_model(model_name.unwrap_or("RNNoise"), resource_dir);
-    let current_model_name = denoise.name().to_string();
-    if let Ok(states_lock) = saved_model_states.lock() {
-        if let Some(state) = states_lock.get(&current_model_name) {
-            log::info!("Restoring model '{}' state ({} bytes)", current_model_name, state.len());
-            denoise.load_state(state);
-        }
-    }
-    log::info!("Using denoise model: {}", current_model_name);
-    debug_log(&format!("MODEL: name='{}' requested='{}' resource_dir={:?}",
-        current_model_name, model_name.unwrap_or("RNNoise"), resource_dir.map(|p| p.display().to_string())));
+    let current_model_name = current_model_name.to_string();
+    debug_log(&format!("DSP thread: model={}", current_model_name));
 
     // EQ 初始化
     let mut eq_processor = crate::eq::EqProcessor::new(48000);
@@ -454,8 +474,14 @@ fn dsp_thread(
         last_eq_config = Some(current_eq_config.clone());
     }
 
-    // 监听设备初始化
-    let mut monitor = init_monitor(&String::new(), 48000, FRAME_SIZE);
+    // 监听设备：延迟初始化
+    let mut monitor = crate::audio_init::MonitorState {
+        client: None, render: None, event: None,
+        sample_rate: 0, buffer: Vec::new(),
+        current_device_id: String::new(), was_streaming: false,
+    };
+    let mut mon_was_enabled = false;
+    let mut resample_buf: Vec<f32> = vec![0.0; FRAME_SIZE * 2];
 
     // 爆炸模式音频状态
     let mut explode_audio = ExplodeAudioState::new();
@@ -465,7 +491,6 @@ fn dsp_thread(
     let mut frames_dropped: u64 = 0;
     let mut bgm_buf: Vec<f32> = Vec::new();
     let mut bgm_read_pos: usize = 0;
-    let mut resample_buf: Vec<f32> = vec![0.0; FRAME_SIZE * 2];
     let mut hp_x_prev: f32 = 0.0;
     let mut hp_y_prev: f32 = 0.0;
     let mut stats_start = std::time::Instant::now();
@@ -510,9 +535,7 @@ fn dsp_thread(
         // ── 监听点 1：原始输入 ──
         let mon_enabled = monitor_enabled.load(Ordering::Acquire);
         let mon_point = monitor_point.load(Ordering::Relaxed);
-        if mon_enabled && mon_point == 1 && monitor.render.is_some() {
-            write_to_monitor(&input_frame, &monitor.render, &monitor.event, &mut monitor.buffer, monitor.sample_rate, &mut resample_buf);
-        }
+        monitor_write!(monitor, 1, mon_point, mon_enabled, &input_frame, &mut resample_buf);
 
         // ── 1. 降噪 ──
         if current_config.enabled {
@@ -562,17 +585,13 @@ fn dsp_thread(
         }
 
         // ── 监听点 2：降噪后 ──
-        if mon_enabled && mon_point == 2 && monitor.render.is_some() {
-            write_to_monitor(&frame, &monitor.render, &monitor.event, &mut monitor.buffer, monitor.sample_rate, &mut resample_buf);
-        }
+        monitor_write!(monitor, 2, mon_point, mon_enabled, &frame, &mut resample_buf);
 
         // ── 2. 增益 ──
         for sample in frame.iter_mut() { *sample *= current_config.mic_gain; }
 
         // ── 监听点 3：增益后 ──
-        if mon_enabled && mon_point == 3 && monitor.render.is_some() {
-            write_to_monitor(&frame, &monitor.render, &monitor.event, &mut monitor.buffer, monitor.sample_rate, &mut resample_buf);
-        }
+        monitor_write!(monitor, 3, mon_point, mon_enabled, &frame, &mut resample_buf);
 
         // ── 3. EQ（带噪声门：信号极小时跳过 EQ，防止 biquad 放大噪声底）──
         if last_eq_config.as_ref().map_or(false, |c| c.enabled) {
@@ -589,9 +608,7 @@ fn dsp_thread(
         }
 
         // ── 监听点 4：EQ 后 ──
-        if mon_enabled && mon_point == 4 && monitor.render.is_some() {
-            write_to_monitor(&frame, &monitor.render, &monitor.event, &mut monitor.buffer, monitor.sample_rate, &mut resample_buf);
-        }
+        monitor_write!(monitor, 4, mon_point, mon_enabled, &frame, &mut resample_buf);
 
         // ── 4. BGM 混音 ──
         if bgm_running.load(Ordering::Acquire) {
@@ -676,13 +693,17 @@ fn dsp_thread(
         }
 
         // ── 监听点 5：最终输出（limiter 后）──
-        if mon_enabled && mon_point == 5 && monitor.render.is_some() {
-            write_to_monitor(&frame, &monitor.render, &monitor.event, &mut monitor.buffer, monitor.sample_rate, &mut resample_buf);
-        }
+        monitor_write!(monitor, 5, mon_point, mon_enabled, &frame, &mut resample_buf);
 
         // 监听流启停控制
-        if mon_enabled && mon_point > 0 {
-            if !monitor.was_streaming {
+        if mon_enabled {
+            // 延迟初始化
+            if !mon_was_enabled {
+                monitor = init_monitor(&String::new(), 48000, FRAME_SIZE);
+                mon_was_enabled = true;
+                debug_log("Monitor: initialized");
+            }
+            if !monitor.was_streaming && mon_point > 0 {
                 if let Some(ref mut m_client) = monitor.client {
                     match m_client.start_stream() {
                         Ok(()) => {
@@ -695,12 +716,15 @@ fn dsp_thread(
                     }
                 }
             }
-        } else if monitor.was_streaming {
-            if let Some(ref mut m_client) = monitor.client {
-                let _ = m_client.stop_stream();
-                debug_log("Monitor: stopped streaming");
+        } else {
+            if monitor.was_streaming {
+                if let Some(ref mut m_client) = monitor.client {
+                    let _ = m_client.stop_stream();
+                    debug_log("Monitor: stopped streaming");
+                }
+                monitor.was_streaming = false;
             }
-            monitor.was_streaming = false;
+            mon_was_enabled = false;
         }
 
         // ── 8. 统计更新（每 5 帧） ──

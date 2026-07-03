@@ -43,3 +43,8 @@ tmp_query*.py
 
 # API keys
 scripts/.tavily-key
+
+# Misc
+apo-poc/
+docs/microsoft-partner-center-registration.md
+docs/superpowers/

@@ -407,6 +407,10 @@ const handleMonitorChange = async (enabled: boolean) => {
   saveConfig()
   try {
     await setMonitorMode(enabled)
+    // 开启监听时同步当前监听点
+    if (enabled && monitorPoint.value > 0) {
+      await setMonitorPoint(monitorPoint.value)
+    }
   } catch (e) {
     console.error('Failed to set monitor mode:', e)
   }

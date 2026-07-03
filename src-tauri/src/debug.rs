@@ -23,8 +23,14 @@ pub fn debug_log(msg: &str) {
     };
     if guard.is_none() {
         let log_path = std::env::temp_dir().join("meowmic-debug.log");
+        let needs_bom = !log_path.exists();
         if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            *guard = Some(BufWriter::new(f));
+            let mut writer = BufWriter::new(f);
+            // 新文件写入 UTF-8 BOM，让 Windows 正确识别编码
+            if needs_bom {
+                let _ = writer.write_all(&[0xEF, 0xBB, 0xBF]);
+            }
+            *guard = Some(writer);
         }
     }
     if let Some(ref mut writer) = *guard {
