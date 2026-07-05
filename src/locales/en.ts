@@ -47,6 +47,12 @@ export default {
       output: 'Final Output',
     },
     micGain: 'Mic Gain',
+    gainMode: 'Gain Mode',
+    manual: 'Manual',
+    auto: 'Auto',
+    agcTarget: 'Target Level',
+    gainDescManual: 'Manual gain multiplier, 100% is the original volume',
+    gainDescAuto: 'Auto-adjusts gain to keep volume stable, prevents fluctuations',
   },
   bgm: {
     label: 'BGM Mixer',

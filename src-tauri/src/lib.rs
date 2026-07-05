@@ -1,3 +1,4 @@
+mod agc;
 mod audio_engine;
 mod audio_init;
 mod audio_utils;
@@ -148,6 +149,8 @@ fn update_denoise_config(
     strength: Option<f32>,
     mic_gain: Option<f32>,
     suppress_level: Option<f32>,
+    agc_enabled: Option<bool>,
+    agc_target: Option<f32>,
 ) -> Result<(), String> {
     let engine = state.engine.lock();
     let mut config = engine.get_config();
@@ -162,6 +165,12 @@ fn update_denoise_config(
     }
     if let Some(sl) = suppress_level {
         config.suppress_level = sl.clamp(0.0, 1.0);
+    }
+    if let Some(a) = agc_enabled {
+        config.agc_enabled = a;
+    }
+    if let Some(t) = agc_target {
+        config.agc_target = t.clamp(0.01, 1.0);
     }
     engine.update_config(config);
     Ok(())

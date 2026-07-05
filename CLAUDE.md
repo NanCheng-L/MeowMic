@@ -69,6 +69,7 @@ src-tauri/src/          # Rust 后端
   debug.rs              # 调试日志（%TEMP%\meowmic-debug.log）
   device.rs             # 设备查找
   denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs FFI）
+  agc.rs                # AGC 自动增益控制（VAD 门控：仅人声时更新增益，安静时冻结）
   eq.rs                 # EQ 均衡器（Biquad IIR 滤波器 + 10 段 Peaking EQ）
   explode.rs            # 爆炸模式（方波失真/电流声/白噪音/机器人声/恶魔声）
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
@@ -119,7 +120,9 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI 首次启动预热**：打包后首次启动，WASAPI 设备可能需要几帧才能进入稳定状态，前几帧可能是空数据。解决：启动后预热最多 3 次（每次 300ms），检测到非零信号才进入主循环；预热失败则重启流重试
 - **打包调试日志**：`env_logger::init()` 在打包后无输出。用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，格式 `[elapsed] message`
 - **增益控制位置**：`mic_gain` 必须在降噪**之后**应用（`audio_loop` 中 denoise 输出 → strength mixing → mic_gain），放在降噪前会放大噪音导致降噪效果变差
-- **EQ 均衡器位置**：EQ 在 `audio_loop` 中位于 mic_gain **之后**、爆炸模式**之前**（mic_gain → EQ → explode），EQ 调整的是增益后的音色
+- **AGC 模式切换重置**：从手动切到 AGC 时必须重置 `AgcState`（`agc.reset()`），否则旧的 smoothed_rms 和 gain 状态会导致增益突变产生杂音
+- **AGC VAD 门控**：AGC 只在检测到人声时更新增益，安静时增益冻结。参考 dagc（sile/dagc）和 WebRTC AGC 的设计。不用 VAD 门控会导致安静时增益飙升，一说话就爆音
+- **EQ 均衡器位置**：EQ 在 `audio_loop` 中位于增益（手动 mic_gain 或自动 AGC）**之后**、爆炸模式**之前**（gain → EQ → explode），EQ 调整的是增益后的音色
 - **update_denoise_config 竞争**：每次调用都创建 `DenoiseConfig::default()` 会重置 strength 为 0.5。必须先 `get_config()` 读当前值再只更新传入的字段
 - **Windows 版本信息读取**：`windows` crate 0.58 没有 `Win32_System_Diagnostics_Process` feature，`GetFileVersionInfoW`/`VerQueryValueW` 需用 raw FFI（`extern "system"` 声明）
 - **进程名获取不可靠**：FileDescription 对国产软件（网易云、抖音、QQ浏览器）通常返回英文或截断值，必须用 exe 名映射表兜底；窗口标题包含动态内容（歌名、场景名），需清理 " - " 后缀和版本号

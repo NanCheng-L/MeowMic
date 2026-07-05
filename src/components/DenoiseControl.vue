@@ -26,6 +26,8 @@ const props = defineProps<{
   monitorEnabled: boolean
   monitorPoint: number
   micGain: number
+  agcEnabled: boolean
+  agcTarget: number
 }>()
 
 const emit = defineEmits<{
@@ -36,6 +38,8 @@ const emit = defineEmits<{
   'update:monitorEnabled': [value: boolean]
   'update:monitorPoint': [value: number]
   'update:micGain': [value: number]
+  'update:agcEnabled': [value: boolean]
+  'update:agcTarget': [value: number]
 }>()
 
 // 当前预设是否匹配某个内置预设
@@ -110,6 +114,39 @@ const blockNegative = (e: KeyboardEvent) => {
   if (e.key === '-' || e.key === 'e' || e.key === 'E' || e.key === '.') {
     e.preventDefault()
   }
+}
+
+// AGC — 用 dB 显示和调节
+const agcTargetDb = computed(() => {
+  const v = props.agcTarget
+  if (v <= 0) return -60
+  return Math.round(20 * Math.log10(v))
+})
+
+const agcTargetLinear = computed(() => {
+  // 滑块范围 -40 ~ 0 dB，映射到 0.01 ~ 1.0
+  return props.agcTarget
+})
+
+const handleAgcTargetInput = (e: Event) => {
+  const db = Number((e.target as HTMLInputElement).value)
+  const linear = Math.pow(10, db / 20)
+  emit('update:agcTarget', Math.max(0.01, Math.min(1.0, linear)))
+}
+
+const handleAgcTargetInputDirect = (e: Event) => {
+  const db = Number((e.target as HTMLInputElement).value)
+  if (!isNaN(db)) {
+    const clamped = Math.max(-40, Math.min(0, db))
+    const linear = Math.pow(10, clamped / 20)
+    emit('update:agcTarget', linear)
+  }
+}
+
+const spinAgcTarget = (delta: number) => {
+  const newDb = Math.min(0, Math.max(-40, agcTargetDb.value + delta))
+  const linear = Math.pow(10, newDb / 20)
+  emit('update:agcTarget', linear)
 }
 
 // 拖滑块时自动切到自定义
@@ -224,7 +261,26 @@ const handleSliderInput = (e: Event) => {
     </div>
 
     <div class="gain-section">
-      <div class="gain-row">
+      <div class="gain-header">
+        <span class="gain-label">{{ t('denoise.gainMode') }}</span>
+        <div class="gain-mode-toggle">
+          <button
+            :class="['mode-btn', { active: !agcEnabled }]"
+            @click="emit('update:agcEnabled', false)"
+            :disabled="!enabled"
+          >{{ t('denoise.manual') }}</button>
+          <button
+            :class="['mode-btn', { active: agcEnabled }]"
+            @click="emit('update:agcEnabled', true)"
+            :disabled="!enabled"
+          >{{ t('denoise.auto') }}</button>
+        </div>
+      </div>
+      <p class="gain-desc" v-if="!agcEnabled">{{ t('denoise.gainDescManual') }}</p>
+      <p class="gain-desc" v-else>{{ t('denoise.gainDescAuto') }}</p>
+
+      <!-- 手动模式：mic gain -->
+      <div v-if="!agcEnabled" class="gain-row">
         <span class="gain-label">{{ t('denoise.micGain') }}</span>
         <div class="slider-wrapper">
           <input
@@ -253,6 +309,39 @@ const handleSliderInput = (e: Event) => {
           <div class="gain-spinner">
             <button class="spin-up" @click="spinMicGain(10)" :disabled="!enabled">▲</button>
             <button class="spin-down" @click="spinMicGain(-10)" :disabled="!enabled">▼</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 自动模式：AGC target -->
+      <div v-else class="gain-row">
+        <span class="gain-label">{{ t('denoise.agcTarget') }}</span>
+        <div class="slider-wrapper">
+          <input
+            type="range"
+            min="-40"
+            max="0"
+            :value="agcTargetDb"
+            @input="handleAgcTargetInput"
+            class="slider"
+            :style="{ '--slider-color': '#8b5cf6' }"
+          />
+        </div>
+        <div class="gain-input-wrapper">
+          <input
+            type="number"
+            class="gain-input"
+            :value="agcTargetDb"
+            @change="handleAgcTargetInputDirect"
+            @focus="($event.target as HTMLInputElement).select()"
+            min="-40"
+            max="0"
+            step="2"
+          />
+          <span class="gain-percent">dB</span>
+          <div class="gain-spinner">
+            <button class="spin-up" @click="spinAgcTarget(2)" :disabled="!enabled">▲</button>
+            <button class="spin-down" @click="spinAgcTarget(-2)" :disabled="!enabled">▼</button>
           </div>
         </div>
       </div>
@@ -460,6 +549,48 @@ const handleSliderInput = (e: Event) => {
 
 .gain-section {
   margin-top: 8px;
+}
+
+.gain-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.gain-mode-toggle {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mode-btn {
+  padding: 3px 12px;
+  font-size: 11px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: white;
+}
+
+.mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gain-desc {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .gain-row {

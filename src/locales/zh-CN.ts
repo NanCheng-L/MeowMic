@@ -47,6 +47,12 @@ export default {
       output: '最终输出',
     },
     micGain: '麦克风增益',
+    gainMode: '增益模式',
+    manual: '手动',
+    auto: '自动',
+    agcTarget: '目标电平',
+    gainDescManual: '手动调节麦克风增益倍数，100% 为原始音量',
+    gainDescAuto: '自动调整增益，保持音量稳定，避免忽大忽小',
   },
   bgm: {
     label: 'BGM 混音',

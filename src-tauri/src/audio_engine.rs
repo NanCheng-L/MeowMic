@@ -41,11 +41,20 @@ pub struct DenoiseConfig {
     pub strength: f32,
     pub suppress_level: f32,
     pub mic_gain: f32,
+    pub agc_enabled: bool,
+    pub agc_target: f32,
 }
 
 impl Default for DenoiseConfig {
     fn default() -> Self {
-        Self { enabled: true, strength: 0.5, suppress_level: 0.5, mic_gain: 1.0 }
+        Self {
+            enabled: true,
+            strength: 0.5,
+            suppress_level: 0.5,
+            mic_gain: 1.0,
+            agc_enabled: false,
+            agc_target: 0.03,
+        }
     }
 }
 
@@ -538,9 +547,14 @@ fn dsp_thread(
 
     // 打印初始配置
     let init_config = config.read().clone();
-    debug_log(&format!("DSP_INIT: model={} enabled={} strength={} suppress={} mic_gain={} eq={} explode={} bgm={}",
+    debug_log(&format!("DSP_INIT: model={} enabled={} strength={} suppress={} mic_gain={} agc={} agc_target={} eq={} explode={} bgm={}",
         current_model_name, init_config.enabled, init_config.strength, init_config.suppress_level, init_config.mic_gain,
+        init_config.agc_enabled, init_config.agc_target,
         eq_config.read().enabled, explode_enabled.load(Ordering::Relaxed), bgm_running.load(Ordering::Relaxed)));
+
+    // AGC 状态
+    let mut agc = crate::agc::AgcState::new();
+    let mut last_agc_enabled = init_config.agc_enabled;
 
     while running.load(Ordering::Acquire) {
         // 检查模型热切换请求（非阻塞，模型已在后台线程创建好）
@@ -651,8 +665,20 @@ fn dsp_thread(
         // ── 监听点 2：降噪后 ──
         monitor_write!(monitor, 2, mon_point, mon_enabled, &frame, &mut resample_buf);
 
-        // ── 2. 增益 ──
-        for sample in frame.iter_mut() { *sample *= current_config.mic_gain; }
+        // ── 2. 增益（手动 or AGC 自动）──
+        if current_config.agc_enabled {
+            // AGC 自动模式：检测模式切换时重置状态
+            if !last_agc_enabled {
+                agc.reset();
+                last_agc_enabled = true;
+            }
+            // 计算增益前的 RMS（用于 AGC 内部 VAD 判断）
+            let input_rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+            agc.process_frame(&mut frame, current_config.agc_target, input_rms);
+        } else {
+            last_agc_enabled = false;
+            for sample in frame.iter_mut() { *sample *= current_config.mic_gain; }
+        }
 
         // ── 监听点 3：增益后 ──
         monitor_write!(monitor, 3, mon_point, mon_enabled, &frame, &mut resample_buf);

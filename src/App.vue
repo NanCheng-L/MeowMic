@@ -35,6 +35,8 @@ const denoiseEnabled = ref(false)
 const denoiseStrength = ref(0.5)
 const micGain = ref(1.0)
 const suppressLevel = ref(0.0) // 噪声门：RNNoise 默认 0.3，DeepFilterNet3 默认 0
+const agcEnabled = ref(false)
+const agcTarget = ref(0.03)
 const isLoading = ref(false)
 
 const openTutorial = async () => {
@@ -168,6 +170,8 @@ const loadConfig = () => {
       if (config.monitorPoint !== undefined) monitorPoint.value = config.monitorPoint
       if (config.explodeIntensity !== undefined) explodeIntensity.value = config.explodeIntensity
       if (config.eqEnabled !== undefined) eqEnabled.value = config.eqEnabled
+      if (config.agcEnabled !== undefined) agcEnabled.value = config.agcEnabled
+      if (config.agcTarget !== undefined) agcTarget.value = config.agcTarget
     }
     // EQ 预设单独存储
     const savedPreset = localStorage.getItem('meowmic-eq-preset')
@@ -192,6 +196,8 @@ const saveConfig = () => {
       monitorPoint: monitorPoint.value,
       explodeIntensity: explodeIntensity.value,
       eqEnabled: eqEnabled.value,
+      agcEnabled: agcEnabled.value,
+      agcTarget: agcTarget.value,
     }))
   } catch (e) {
     console.error('Failed to save config:', e)
@@ -273,7 +279,7 @@ const handleStart = async () => {
     isRunning.value = true
     conflictRetries = 0
     // 启动后同步降噪开关状态到后端
-    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value, suppressLevel: suppressLevel.value })
+    await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value, suppressLevel: suppressLevel.value, agcEnabled: agcEnabled.value, agcTarget: agcTarget.value })
     // 同步监听开关和监听点到后端
     if (monitorEnabled.value) {
       await setMonitorMode(true)
@@ -290,7 +296,7 @@ const handleStart = async () => {
     if (msg.includes('already running')) {
       console.warn('Engine already running, syncing state')
       isRunning.value = true
-      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value, suppressLevel: suppressLevel.value })
+      await updateConfig({ enabled: denoiseEnabled.value, strength: denoiseStrength.value, micGain: micGain.value, suppressLevel: suppressLevel.value, agcEnabled: agcEnabled.value, agcTarget: agcTarget.value })
       if (monitorEnabled.value) {
         await setMonitorMode(true)
         if (monitorPoint.value > 0) {
@@ -377,6 +383,18 @@ const handleStrengthChange = async (strength: number) => {
 const handleMicGainChange = async (gain: number) => {
   micGain.value = gain
   await updateConfig({ micGain: gain })
+  saveConfig()
+}
+
+const handleAgcEnabledChange = async (enabled: boolean) => {
+  agcEnabled.value = enabled
+  await updateConfig({ agcEnabled: enabled })
+  saveConfig()
+}
+
+const handleAgcTargetChange = async (target: number) => {
+  agcTarget.value = target
+  await updateConfig({ agcTarget: target })
   saveConfig()
 }
 
@@ -802,6 +820,8 @@ onUnmounted(() => {
           :monitor-enabled="monitorEnabled"
           :monitor-point="monitorPoint"
           :mic-gain="micGain"
+          :agc-enabled="agcEnabled"
+          :agc-target="agcTarget"
           @update:enabled="handleEnabledChange"
           @update:strength="handleStrengthChange"
           @update:model="handleModelChange"
@@ -809,6 +829,8 @@ onUnmounted(() => {
           @update:monitor-enabled="handleMonitorChange"
           @update:monitor-point="handleMonitorPointChange"
           @update:mic-gain="handleMicGainChange"
+          @update:agc-enabled="handleAgcEnabledChange"
+          @update:agc-target="handleAgcTargetChange"
         />
       </section>
 
