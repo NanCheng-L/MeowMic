@@ -41,6 +41,7 @@ pub fn write_to_monitor(
     samples: &[f32],
     render_opt: &Option<AudioRenderClient>,
     event_opt: &Option<wasapi::Handle>,
+    client_opt: &Option<AudioClient>,
     monitor_buffer: &mut [u8],
     _monitor_sample_rate: u32,
     _resample_buf: &mut [f32],
@@ -55,15 +56,29 @@ pub fn write_to_monitor(
         let _ = evt.wait_for_event(2);
     }
 
-    // 设备原生格式是 f32 stereo，直接写入（和 render 一样）
+    // 检查可用空间，避免缓冲区溢出
     let frames = samples.len();
-    let stereo_f32_bytes = frames * 2 * 4; // stereo f32
+    let writable = if let Some(client) = client_opt {
+        match client.get_available_space_in_frames() {
+            Ok(n) => n as usize,
+            Err(_) => return,
+        }
+    } else {
+        frames
+    };
+    if writable == 0 {
+        return;
+    }
+    let frames_to_write = frames.min(writable);
+
+    // 设备原生格式是 f32 stereo，直接写入（和 render 一样）
+    let stereo_f32_bytes = frames_to_write * 2 * 4; // stereo f32
     if stereo_f32_bytes > monitor_buffer.len() {
         return;
     }
 
     // mono f32 → stereo f32
-    for i in 0..frames {
+    for i in 0..frames_to_write {
         let val = samples[i];
         let bytes = val.to_le_bytes();
         let pos = i * 8; // 2 channels * 4 bytes
@@ -80,8 +95,8 @@ pub fn write_to_monitor(
             monitor_buffer[pos + 7] = bytes[3];
         }
     }
-    if let Err(e) = render.write_to_device(frames, &monitor_buffer[..stereo_f32_bytes], None) {
-        crate::debug::debug_log(&format!("Monitor write FAILED: frames={} err={:?}", frames, e));
+    if let Err(e) = render.write_to_device(frames_to_write, &monitor_buffer[..stereo_f32_bytes], None) {
+        crate::debug::debug_log(&format!("Monitor write FAILED: frames={} err={:?}", frames_to_write, e));
     }
 }
 

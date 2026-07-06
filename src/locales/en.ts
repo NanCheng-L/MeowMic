@@ -168,6 +168,8 @@ export default {
     faq3A: 'Click the refresh button next to the device selector. If the device still doesn\'t appear, check if it\'s disabled in Device Manager, or try unplugging and reconnecting the USB device.',
     faq4Q: 'Why must I select VB-Cable as output?',
     faq4A: 'If you select speakers as output, the denoised audio will play through speakers and be picked up by the microphone again, creating an echo loop (buzzing noise). VB-Cable is a virtual device that only transmits audio between applications without external playback.',
+    faq5Q: 'Bluetooth headset audio quality drops / enters call mode?',
+    faq5A: 'Bluetooth headsets can only use one mode at a time: A2DP (high-quality stereo playback) or HFP (low-quality call mode with microphone). When the app activates the Bluetooth headset\'s microphone, Windows automatically switches to call mode, causing muffled audio. Solution: select a USB or wired microphone as input instead of the Bluetooth headset\'s mic, so the headset stays in high-quality playback mode.',
     follow: 'Follow the Author',
     gotIt: 'Got it',
   },

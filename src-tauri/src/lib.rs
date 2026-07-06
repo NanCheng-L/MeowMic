@@ -3,6 +3,7 @@ mod audio_engine;
 mod audio_init;
 mod audio_utils;
 mod bgm;
+mod dsp;
 mod debug;
 mod denoise;
 mod device;
@@ -172,6 +173,8 @@ fn update_denoise_config(
     if let Some(t) = agc_target {
         config.agc_target = t.clamp(0.01, 1.0);
     }
+    debug_log(&format!("CONFIG_UPDATE: enabled={} strength={:.2} mic_gain={:.2} suppress={:.2} agc={} agc_target={:.4}",
+        config.enabled, config.strength, config.mic_gain, config.suppress_level, config.agc_enabled, config.agc_target));
     engine.update_config(config);
     Ok(())
 }
@@ -381,23 +384,19 @@ fn list_audio_processes(state: State<'_, EngineState>) -> Result<Vec<(String, St
 
 #[tauri::command]
 fn start_bgm(state: State<'_, EngineState>, pids: Vec<u32>) -> Result<(), String> {
-    debug::debug_log_dev("lib: start_bgm command received, locking engine...");
+    debug_log(&format!("BGM_START: pids={:?}", pids));
     let engine = state.engine.lock();
-    debug::debug_log_dev("lib: start_bgm engine locked, calling start_bgm...");
     let result = engine.start_bgm(pids[0]);
-    debug::debug_log_dev("lib: start_bgm done");
     result
 }
 
 #[tauri::command]
 fn stop_bgm(state: State<'_, EngineState>) -> Result<(), String> {
-    debug::debug_log_dev("lib: stop_bgm command received, locking engine...");
+    debug_log("BGM_STOP");
     let engine = state.engine.lock();
-    debug::debug_log_dev("lib: stop_bgm engine locked, calling stop_bgm...");
     engine.stop_bgm();
     // 用户手动停止 BGM，取消引擎重启后的自动恢复
     engine.cancel_bgm_auto_restart();
-    debug::debug_log_dev("lib: stop_bgm done");
     Ok(())
 }
 
@@ -415,6 +414,7 @@ fn set_explode_mode(state: State<'_, EngineState>, enabled: bool, intensity: Opt
     if let Some(i) = intensity {
         engine.set_explode_intensity(i);
     }
+    debug_log(&format!("EXPLODE_MODE: enabled={} intensity={:?}", enabled, intensity));
     Ok(())
 }
 
@@ -422,6 +422,7 @@ fn set_explode_mode(state: State<'_, EngineState>, enabled: bool, intensity: Opt
 fn set_explode_effect(state: State<'_, EngineState>, effect: u32) -> Result<(), String> {
     let engine = state.engine.lock();
     engine.set_explode_effect(ExplodeEffect::from_u32(effect));
+    debug_log(&format!("EXPLODE_EFFECT: effect={}", effect));
     Ok(())
 }
 
@@ -459,7 +460,10 @@ fn update_eq_config(
         }
         config.bands = arr;
     }
-    engine.update_eq_config(config);
+    engine.update_eq_config(config.clone());
+    debug_log(&format!("EQ_UPDATE: enabled={} bands=[{}]",
+        config.enabled,
+        config.bands.iter().map(|v| format!("{:.1}", v)).collect::<Vec<_>>().join(", ")));
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use crate::denoise::{self, FRAME_SIZE};
+use crate::dsp::DspModule;
 use crate::eq::EqConfig;
 use crate::explode::ExplodeState;
 use crate::audio_init::init_monitor;
@@ -27,6 +28,7 @@ macro_rules! monitor_write {
                 $samples,
                 &$monitor.render,
                 &$monitor.event,
+                &$monitor.client,
                 &mut $monitor.buffer,
                 $monitor.sample_rate,
                 $resample,
@@ -540,10 +542,12 @@ fn dsp_thread(
     let mut frames_dropped: u64 = 0;
     let mut bgm_buf: Vec<f32> = Vec::new();
     let mut bgm_read_pos: usize = 0;
-    let mut hp_x_prev: f32 = 0.0;
-    let mut hp_y_prev: f32 = 0.0;
     let mut stats_start = std::time::Instant::now();
-    let mut gate_open: f32 = 1.0; // 噪声门状态：0.0=关闭，1.0=打开
+
+    // DSP 模块
+    let mut hpf = crate::dsp::hpf::HighPassFilter::default_48k();
+    let mut limiter = crate::dsp::limiter::SoftLimiter::default_limiter();
+    let mut noise_gate = crate::dsp::noise_gate::NoiseGate::new(0.01);
 
     // 打印初始配置
     let init_config = config.read().clone();
@@ -645,15 +649,8 @@ fn dsp_thread(
             // 噪声门（仅 RNNoise，DeepFilterNet3 不需要）
             if !denoise.has_internal_strength_control() && current_config.suppress_level > 0.01 {
                 let threshold = 0.001 + current_config.suppress_level * 0.009;
-                let frame_rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
-                let target = if frame_rms > threshold { 1.0 } else { 0.0 };
-                let speed = if target > gate_open { 0.1 } else { 0.02 };
-                gate_open = gate_open + (target - gate_open) * speed;
-                if gate_open < 0.99 {
-                    for sample in frame.iter_mut() {
-                        *sample *= gate_open;
-                    }
-                }
+                noise_gate.set_threshold(threshold);
+                noise_gate.process(&mut frame);
             }
 
             // Denormal flush
@@ -672,9 +669,7 @@ fn dsp_thread(
                 agc.reset();
                 last_agc_enabled = true;
             }
-            // 计算增益前的 RMS（用于 AGC 内部 VAD 判断）
-            let input_rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
-            agc.process_frame(&mut frame, current_config.agc_target, input_rms);
+            agc.process_frame(&mut frame, current_config.agc_target);
         } else {
             last_agc_enabled = false;
             for sample in frame.iter_mut() { *sample *= current_config.mic_gain; }
@@ -747,39 +742,17 @@ fn dsp_thread(
             for (i, &s) in output.iter().enumerate() { frame[i] = s / 32767.0; }
         }
 
-        // ── 6. Soft limiter（normalized f32 范围，炸麦模式下跳过压缩）──
+        // ── 6. Soft limiter（炸麦模式下跳过压缩，只做 NaN 检查）──
         if !explode_enabled.load(Ordering::Acquire) {
-            for sample in frame.iter_mut() {
-                if sample.is_finite() {
-                    let abs = sample.abs();
-                    if abs > 0.73 { *sample = sample.signum() * (0.73 + (abs - 0.73) * 0.1).min(0.92); }
-                    if !sample.is_finite() { *sample = 0.0; }
-                } else { *sample = 0.0; }
-            }
+            limiter.process(&mut frame);
         } else {
-            // 炸麦模式：只做 NaN 检查，不做压缩
             for sample in frame.iter_mut() {
                 if !sample.is_finite() { *sample = 0.0; }
             }
         }
 
         // ── 6.5 高通滤波器（80Hz，切除次声波）──
-        {
-            const HP_ALPHA: f32 = 0.98953;
-            let mut x_prev = hp_x_prev;
-            let mut y_prev = hp_y_prev;
-            for sample in frame.iter_mut() {
-                let x = *sample;
-                let y = HP_ALPHA * (y_prev + x - x_prev);
-                *sample = y;
-                x_prev = x;
-                y_prev = y;
-            }
-            if !x_prev.is_finite() || x_prev.abs() < 1e-10 { x_prev = 0.0; }
-            if !y_prev.is_finite() || y_prev.abs() < 1e-10 { y_prev = 0.0; }
-            hp_x_prev = x_prev;
-            hp_y_prev = y_prev;
-        }
+        hpf.process(&mut frame);
 
         // ── 监听点 5：最终输出（limiter 后）──
         monitor_write!(monitor, 5, mon_point, mon_enabled, &frame, &mut resample_buf);
@@ -790,26 +763,29 @@ fn dsp_thread(
             if !mon_was_enabled {
                 monitor = init_monitor(&String::new(), 48000, FRAME_SIZE);
                 mon_was_enabled = true;
-                debug_log_dev("Monitor: initialized");
+                debug_log(&format!("Monitor: initialized, client={}, render={}, event={}",
+                    monitor.client.is_some(), monitor.render.is_some(), monitor.event.is_some()));
             }
             if !monitor.was_streaming && mon_point > 0 {
                 if let Some(ref mut m_client) = monitor.client {
                     match m_client.start_stream() {
                         Ok(()) => {
                             monitor.was_streaming = true;
-                            debug_log_dev(&format!("Monitor: started streaming at point {}", mon_point));
+                            debug_log(&format!("Monitor: started streaming at point {}", mon_point));
                         }
                         Err(e) => {
                             debug_log(&format!("Monitor: start_stream FAILED: {:?}", e));
                         }
                     }
+                } else {
+                    debug_log(&format!("Monitor: cannot start - client is None, mon_point={}", mon_point));
                 }
             }
         } else {
             if monitor.was_streaming {
                 if let Some(ref mut m_client) = monitor.client {
                     let _ = m_client.stop_stream();
-                    debug_log_dev("Monitor: stopped streaming");
+                    debug_log("Monitor: stopped streaming");
                 }
                 monitor.was_streaming = false;
             }

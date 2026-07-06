@@ -150,6 +150,10 @@ onUnmounted(() => {
           <strong>{{ t('tutorial.faq4Q') }}</strong>
           <p>{{ t('tutorial.faq4A') }}</p>
         </div>
+        <div class="faq-item">
+          <strong>{{ t('tutorial.faq5Q') }}</strong>
+          <p>{{ t('tutorial.faq5A') }}</p>
+        </div>
       </section>
 
       <!-- 关注作者 -->

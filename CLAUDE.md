@@ -69,7 +69,13 @@ src-tauri/src/          # Rust 后端
   debug.rs              # 调试日志（%TEMP%\meowmic-debug.log）
   device.rs             # 设备查找
   denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs FFI）
-  agc.rs                # AGC 自动增益控制（VAD 门控：仅人声时更新增益，安静时冻结）
+  dsp/                  # DSP 模块（统一 DspModule trait）
+    mod.rs              # DspModule trait 定义（name/process/reset）
+    hpf.rs              # 高通滤波器（80Hz，切除次声波）
+    limiter.rs          # 软限幅器（阈值0.73, 10:1, 硬限0.92）
+    noise_gate.rs       # 噪声门（平滑 attack/release，基于信号电平）
+    vad.rs              # 语音活动检测（噪声底追踪 + 自适应阈值 + 连续帧计数）
+  agc.rs                # AGC 自动增益控制（使用独立 VadState + NoiseGate 模块）
   eq.rs                 # EQ 均衡器（Biquad IIR 滤波器 + 10 段 Peaking EQ）
   explode.rs            # 爆炸模式（方波失真/电流声/白噪音/机器人声/恶魔声）
   device_watcher.rs     # 设备热拔插检测（后台轮询 + Tauri 事件）
@@ -121,7 +127,7 @@ scripts/                # 构建/发布辅助脚本
 - **打包调试日志**：`env_logger::init()` 在打包后无输出。用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，格式 `[elapsed] message`
 - **增益控制位置**：`mic_gain` 必须在降噪**之后**应用（`audio_loop` 中 denoise 输出 → strength mixing → mic_gain），放在降噪前会放大噪音导致降噪效果变差
 - **AGC 模式切换重置**：从手动切到 AGC 时必须重置 `AgcState`（`agc.reset()`），否则旧的 smoothed_rms 和 gain 状态会导致增益突变产生杂音
-- **AGC VAD 门控**：AGC 只在检测到人声时更新增益，安静时增益冻结。参考 dagc（sile/dagc）和 WebRTC AGC 的设计。不用 VAD 门控会导致安静时增益飙升，一说话就爆音
+- **AGC VAD 门控**：AGC 使用独立 `VadState` 模块进行语音活动检测，基于噪声底追踪的自适应阈值（`VAD_ABOVE_NOISE=6.0`，`VAD_MIN_THRESHOLD=0.002`）。只在连续7帧检测到语音后才允许增益提升（防止噪声尖峰触发）。安静时增益冻结 + 噪声门关闭
 - **EQ 均衡器位置**：EQ 在 `audio_loop` 中位于增益（手动 mic_gain 或自动 AGC）**之后**、爆炸模式**之前**（gain → EQ → explode），EQ 调整的是增益后的音色
 - **update_denoise_config 竞争**：每次调用都创建 `DenoiseConfig::default()` 会重置 strength 为 0.5。必须先 `get_config()` 读当前值再只更新传入的字段
 - **Windows 版本信息读取**：`windows` crate 0.58 没有 `Win32_System_Diagnostics_Process` feature，`GetFileVersionInfoW`/`VerQueryValueW` 需用 raw FFI（`extern "system"` 声明）
@@ -138,6 +144,9 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI IAudioSessionManager2**：枚举音频会话需要 `Win32_System_Com` + `Win32_Media_Audio` feature；活跃会话始终显示，非活跃会话仅保留映射表中的已知播放器（避免系统进程如 audiodg 出现）；同名进程按名称去重
 - **WASAPI 输出编码格式**：输出编码必须用**输出设备**的 format（`output_bits` / `output_sample_type`），不能用输入设备的。VB-Audio Cable 通常是 32-bit float，麦克风通常是 16-bit int，混用会导致字节错位产生破音
 - **WASAPI render 设备查找**：`GetDevice(PCWSTR)` 需要设备 ID（`{0.0.0.00000000}.{guid}`），但前端传的是友好名称（如 "CABLE Input (VB-Audio Virtual Cable)"）。直接调用会失败回退到默认设备。解决：失败时枚举 `EnumAudioEndpoints` 按友好名称匹配，需要 `Win32_UI_Shell_PropertiesSystem` feature 访问 `PKEY_Device_FriendlyName`
+- **WASAPI capture 设备查找同理**：`wasapi_capture.rs` 的 `find_device` 也用 `GetDevice(PCWSTR)` 查找设备，传入友好名称必然失败后回退到默认通讯设备（`eCommunications`），可能返回静音流。解决：和 render 端一样，失败时枚举设备按友好名称匹配
+- **监听缓冲区溢出**：`write_to_monitor` 每次写固定帧数不检查可用空间，导致 `0x88890006`（`AUDCLNT_BUFFER_OVERFLOW`）。解决：写入前调 `client.get_available_space_in_frames()` 获取实际可写帧数，只写能写的量，空间不足时跳过
+- **配置状态日志**：所有开关状态变更（降噪/EQ/AGC/爆炸/BGM/监听）必须用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，方便排查用户问题。关键日志：`CONFIG_UPDATE`、`EQ_UPDATE`、`EXPLODE_MODE`、`BGM_START/STOP`、`set_monitor_mode/point`
 - **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`
 - **Soft limiter 阈值与压缩比**：阈值不能太高（28000 太接近 0dBFS），压缩比不能太温和（0.2 即 5:1 仍可能输出 30000+）。推荐阈值 24000、压缩比 0.1（10:1）、硬上限 30000
 - **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏

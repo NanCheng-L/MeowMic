@@ -123,11 +123,6 @@ const agcTargetDb = computed(() => {
   return Math.round(20 * Math.log10(v))
 })
 
-const agcTargetLinear = computed(() => {
-  // 滑块范围 -40 ~ 0 dB，映射到 0.01 ~ 1.0
-  return props.agcTarget
-})
-
 const handleAgcTargetInput = (e: Event) => {
   const db = Number((e.target as HTMLInputElement).value)
   const linear = Math.pow(10, db / 20)
@@ -267,12 +262,10 @@ const handleSliderInput = (e: Event) => {
           <button
             :class="['mode-btn', { active: !agcEnabled }]"
             @click="emit('update:agcEnabled', false)"
-            :disabled="!enabled"
           >{{ t('denoise.manual') }}</button>
           <button
             :class="['mode-btn', { active: agcEnabled }]"
             @click="emit('update:agcEnabled', true)"
-            :disabled="!enabled"
           >{{ t('denoise.auto') }}</button>
         </div>
       </div>
@@ -307,8 +300,8 @@ const handleSliderInput = (e: Event) => {
           />
           <span class="gain-percent">%</span>
           <div class="gain-spinner">
-            <button class="spin-up" @click="spinMicGain(10)" :disabled="!enabled">▲</button>
-            <button class="spin-down" @click="spinMicGain(-10)" :disabled="!enabled">▼</button>
+            <button class="spin-up" @click="spinMicGain(10)">▲</button>
+            <button class="spin-down" @click="spinMicGain(-10)">▼</button>
           </div>
         </div>
       </div>
@@ -340,8 +333,8 @@ const handleSliderInput = (e: Event) => {
           />
           <span class="gain-percent">dB</span>
           <div class="gain-spinner">
-            <button class="spin-up" @click="spinAgcTarget(2)" :disabled="!enabled">▲</button>
-            <button class="spin-down" @click="spinAgcTarget(-2)" :disabled="!enabled">▼</button>
+            <button class="spin-up" @click="spinAgcTarget(2)">▲</button>
+            <button class="spin-down" @click="spinAgcTarget(-2)">▼</button>
           </div>
         </div>
       </div>

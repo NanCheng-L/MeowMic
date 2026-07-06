@@ -172,6 +172,20 @@ impl EqProcessor {
     }
 }
 
+impl crate::dsp::DspModule for EqProcessor {
+    fn name(&self) -> &str {
+        "EQ"
+    }
+
+    fn process(&mut self, frame: &mut [f32]) {
+        self.process_frame(frame);
+    }
+
+    fn reset(&mut self) {
+        self.reset_all();
+    }
+}
+
 /// 获取预设的 EQ 增益值
 pub fn get_preset(preset_name: &str) -> [f32; NUM_BANDS] {
     match preset_name {

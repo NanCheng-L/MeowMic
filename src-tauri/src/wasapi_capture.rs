@@ -16,6 +16,7 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use crate::mmcss::ProAudio;
+use crate::debug::debug_log;
 
 /// 每帧样本数（10ms @ 48kHz = 480）
 pub const FRAME_SAMPLES: usize = 480;
@@ -102,6 +103,31 @@ fn capture_loop(
         let device_channels = (*mix_ptr).nChannels as usize;
         let device_bits = (*mix_ptr).wBitsPerSample;
         let needs_convert = !(device_rate == SAMPLE_RATE && device_channels == 1);
+
+        // 检测格式类型并记录到 debug log
+        let w_format_tag = (*mix_ptr).wFormatTag;
+        let sub_format_str = if w_format_tag == 3 {
+            "IEEE_FLOAT".to_string()
+        } else if w_format_tag == 1 {
+            "PCM".to_string()
+        } else if w_format_tag == 0xFFFE {
+            // WAVE_FORMAT_EXTENSIBLE: 检查 SubFormat
+            let ext = &*(mix_ptr as *const WAVEFORMATEXTENSIBLE);
+            let sub = ext.SubFormat;
+            if sub == windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00AA00389B71) {
+                "EXT-IEEE_FLOAT".to_string()
+            } else if sub == windows::core::GUID::from_u128(0x00000001_0000_0010_8000_00AA00389B71) {
+                "EXT-PCM".to_string()
+            } else {
+                format!("EXT-{:?}", sub)
+            }
+        } else {
+            format!("UNKNOWN({})", w_format_tag)
+        };
+        debug_log(&format!(
+            "CAPTURE_INIT: rate={} ch={} bits={} fmt={} (tag={}) device='{}'",
+            device_rate, device_channels, device_bits, sub_format_str, w_format_tag, device_id
+        ));
 
         log::info!(
             "capture: device_rate={} channels={} bits={} convert={}",
@@ -209,15 +235,40 @@ fn capture_loop(
 fn find_device(enumerator: &IMMDeviceEnumerator, id: &str) -> Result<IMMDevice, String> {
     unsafe {
         if id.is_empty() || id == "default" {
+            debug_log("CAPTURE_DEVICE: using default communications endpoint");
             return enumerator
                 .GetDefaultAudioEndpoint(eCapture, eCommunications)
                 .map_err(|e| format!("GetDefaultAudioEndpoint: {}", e));
         }
+
+        // 尝试直接用 GetDevice（需要设备 ID，不是友好名称）
         let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
         match enumerator.GetDevice(PCWSTR::from_raw(wide.as_ptr())) {
-            Ok(d) => Ok(d),
+            Ok(d) => {
+                debug_log(&format!("CAPTURE_DEVICE: GetDevice OK for '{}'", id));
+                Ok(d)
+            }
             Err(_) => {
-                log::warn!("capture: device '{}' not found, using default", id);
+                // GetDevice 失败（传入的是友好名称），枚举设备按友好名称匹配
+                debug_log(&format!("CAPTURE_DEVICE: GetDevice failed for '{}', enumerating...", id));
+                let collection = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
+                    .map_err(|e| format!("EnumAudioEndpoints: {}", e))?;
+                let count = collection.GetCount()
+                    .map_err(|e| format!("GetCount: {}", e))?;
+                for i in 0..count {
+                    if let Ok(dev) = collection.Item(i) {
+                        if let Ok(props) = dev.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
+                            if let Ok(name_var) = props.GetValue(&windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName) {
+                                let name = name_var.to_string();
+                                if name == id {
+                                    debug_log(&format!("CAPTURE_DEVICE: matched '{}' at index {}", name, i));
+                                    return Ok(dev);
+                                }
+                            }
+                        }
+                    }
+                }
+                debug_log(&format!("CAPTURE_DEVICE: '{}' not found in enum, using default", id));
                 enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications)
                     .map_err(|e| format!("GetDefaultAudioEndpoint fallback: {}", e))
             }
