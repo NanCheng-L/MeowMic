@@ -32,6 +32,8 @@ macro_rules! monitor_write {
                 &mut $monitor.buffer,
                 $monitor.sample_rate,
                 $resample,
+                $monitor.channels,
+                $monitor.bits_per_sample,
             );
         }
     };
@@ -528,7 +530,8 @@ fn dsp_thread(
     // 监听设备：延迟初始化
     let mut monitor = crate::audio_init::MonitorState {
         client: None, render: None, event: None,
-        sample_rate: 0, buffer: Vec::new(),
+        sample_rate: 0, channels: 2, bits_per_sample: 32,
+        buffer: Vec::new(),
         current_device_id: String::new(), was_streaming: false,
     };
     let mut mon_was_enabled = false;

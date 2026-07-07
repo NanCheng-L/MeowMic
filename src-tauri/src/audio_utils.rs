@@ -1,5 +1,11 @@
 #![allow(dead_code)]
 use wasapi::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 监听写入失败计数器（用于限制日志频率）
+static MONITOR_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+static MONITOR_FAIL_FIRST_TIME: AtomicU64 = AtomicU64::new(0);
+static MONITOR_FAIL_LAST_LOG: AtomicU64 = AtomicU64::new(0);
 
 pub fn calculate_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
@@ -45,6 +51,8 @@ pub fn write_to_monitor(
     monitor_buffer: &mut [u8],
     _monitor_sample_rate: u32,
     _resample_buf: &mut [f32],
+    channels: u16,
+    bits_per_sample: u16,
 ) {
     let render = match render_opt {
         Some(r) => r,
@@ -71,32 +79,92 @@ pub fn write_to_monitor(
     }
     let frames_to_write = frames.min(writable);
 
-    // 设备原生格式是 f32 stereo，直接写入（和 render 一样）
-    let stereo_f32_bytes = frames_to_write * 2 * 4; // stereo f32
-    if stereo_f32_bytes > monitor_buffer.len() {
+    // 计算每帧字节数
+    let bytes_per_sample = bits_per_sample as usize / 8;
+    let bytes_per_frame = channels as usize * bytes_per_sample;
+    let total_bytes = frames_to_write * bytes_per_frame;
+    if total_bytes > monitor_buffer.len() {
         return;
     }
 
-    // mono f32 → stereo f32
-    for i in 0..frames_to_write {
-        let val = samples[i];
-        let bytes = val.to_le_bytes();
-        let pos = i * 8; // 2 channels * 4 bytes
-        if pos + 8 <= monitor_buffer.len() {
-            // left channel
-            monitor_buffer[pos] = bytes[0];
-            monitor_buffer[pos + 1] = bytes[1];
-            monitor_buffer[pos + 2] = bytes[2];
-            monitor_buffer[pos + 3] = bytes[3];
-            // right channel
-            monitor_buffer[pos + 4] = bytes[0];
-            monitor_buffer[pos + 5] = bytes[1];
-            monitor_buffer[pos + 6] = bytes[2];
-            monitor_buffer[pos + 7] = bytes[3];
+    // mono f32 → 设备原生格式（多声道复制）
+    match bits_per_sample {
+        32 => {
+            // f32 格式
+            for i in 0..frames_to_write {
+                let val = samples[i];
+                let bytes = val.to_le_bytes();
+                for ch in 0..channels as usize {
+                    let pos = i * bytes_per_frame + ch * bytes_per_sample;
+                    if pos + 4 <= monitor_buffer.len() {
+                        monitor_buffer[pos] = bytes[0];
+                        monitor_buffer[pos + 1] = bytes[1];
+                        monitor_buffer[pos + 2] = bytes[2];
+                        monitor_buffer[pos + 3] = bytes[3];
+                    }
+                }
+            }
+        }
+        16 => {
+            // i16 格式
+            for i in 0..frames_to_write {
+                let val = (samples[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                let bytes = val.to_le_bytes();
+                for ch in 0..channels as usize {
+                    let pos = i * bytes_per_frame + ch * bytes_per_sample;
+                    if pos + 2 <= monitor_buffer.len() {
+                        monitor_buffer[pos] = bytes[0];
+                        monitor_buffer[pos + 1] = bytes[1];
+                    }
+                }
+            }
+        }
+        _ => {
+            // 其他格式 fallback 到 f32
+            crate::debug::debug_log(&format!("Monitor: unsupported {}bit format, fallback to f32", bits_per_sample));
+            for i in 0..frames_to_write {
+                let val = samples[i];
+                let bytes = val.to_le_bytes();
+                for ch in 0..channels as usize {
+                    let pos = i * bytes_per_frame + ch * 4;
+                    if pos + 4 <= monitor_buffer.len() {
+                        monitor_buffer[pos] = bytes[0];
+                        monitor_buffer[pos + 1] = bytes[1];
+                        monitor_buffer[pos + 2] = bytes[2];
+                        monitor_buffer[pos + 3] = bytes[3];
+                    }
+                }
+            }
         }
     }
-    if let Err(e) = render.write_to_device(frames_to_write, &monitor_buffer[..stereo_f32_bytes], None) {
-        crate::debug::debug_log(&format!("Monitor write FAILED: frames={} err={:?}", frames_to_write, e));
+    if let Err(e) = render.write_to_device(frames_to_write, &monitor_buffer[..total_bytes], None) {
+        let count = MONITOR_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // 第一次：记录起始时间，打印完整错误
+        if count == 0 {
+            MONITOR_FAIL_FIRST_TIME.store(now_sec, Ordering::Relaxed);
+            MONITOR_FAIL_LAST_LOG.store(now_sec, Ordering::Relaxed);
+            crate::debug::debug_log(&format!(
+                "Monitor write FAILED: frames={} channels={} bits={} err={:?}",
+                frames_to_write, channels, bits_per_sample, e
+            ));
+        } else {
+            let last_log = MONITOR_FAIL_LAST_LOG.load(Ordering::Relaxed);
+            // 每 10 秒打印一次汇总
+            if now_sec.saturating_sub(last_log) >= 10 {
+                let start = MONITOR_FAIL_FIRST_TIME.load(Ordering::Relaxed);
+                let elapsed = now_sec.saturating_sub(start);
+                crate::debug::debug_log(&format!(
+                    "Monitor write FAILED: {} times in {}s (last err={:?})",
+                    count + 1, elapsed, e
+                ));
+                MONITOR_FAIL_LAST_LOG.store(now_sec, Ordering::Relaxed);
+            }
+        }
     }
 }
 

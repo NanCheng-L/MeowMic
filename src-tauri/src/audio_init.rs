@@ -28,6 +28,8 @@ pub struct MonitorState {
     pub render: Option<AudioRenderClient>,
     pub event: Option<wasapi::Handle>,
     pub sample_rate: u32,
+    pub channels: u16,
+    pub bits_per_sample: u16,
     pub buffer: Vec<u8>,
     pub current_device_id: String,
     pub was_streaming: bool,
@@ -160,6 +162,8 @@ pub fn init_monitor(
         render: None,
         event: None,
         sample_rate: output_sample_rate,
+        channels: 2,
+        bits_per_sample: 32,
         buffer: vec![0u8; monitor_max_frames * 2 * 2], // stereo i16
         current_device_id: String::new(),
         was_streaming: false,
@@ -254,9 +258,16 @@ pub fn init_monitor(
                         state.event = evt.ok();
                         state.current_device_id = device_id;
                         state.sample_rate = device_sample_rate;
-                        // 按监听设备实际采样率重新分配 buffer（可能与 output_sample_rate 不同）
+                        state.channels = monitor_format.get_nchannels();
+                        state.bits_per_sample = monitor_format.get_bitspersample();
+                        // 按监听设备实际格式重新分配 buffer
                         let monitor_max_frames = frame_size * (device_sample_rate as usize / 48000 + 1);
-                        state.buffer = vec![0u8; monitor_max_frames * 2 * 4]; // stereo f32
+                        let bytes_per_sample = state.bits_per_sample as usize / 8;
+                        state.buffer = vec![0u8; monitor_max_frames * state.channels as usize * bytes_per_sample];
+                        debug_log(&format!(
+                            "Monitor: format={}ch/{}bit, buffer={}bytes",
+                            state.channels, state.bits_per_sample, state.buffer.len()
+                        ));
                     } else {
                         debug_log(&format!("Monitor: failed to get render client on '{}'", device_name));
                     }
