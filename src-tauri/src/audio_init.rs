@@ -219,9 +219,9 @@ pub fn init_monitor(
                     "Monitor: initializing client on '{}' ({}Hz, format={:?})",
                     device_name, device_sample_rate, monitor_format
                 ));
-                // 不用 autoconvert，和 render 一致
+                // 用 autoconvert，和 render 一致（WASAPI 自动把 stereo f32 转换成设备原生格式）
                 let monitor_mode = StreamMode::EventsShared {
-                    autoconvert: false,
+                    autoconvert: true,
                     buffer_duration_hns: def_time,
                 };
                 if m_client

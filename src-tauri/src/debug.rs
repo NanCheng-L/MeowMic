@@ -6,8 +6,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 static LOG_LINE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// 缓存的日志文件句柄（避免每次打开/关闭文件）
 static LOG_FILE: Mutex<Option<BufWriter<std::fs::File>>> = Mutex::new(None);
-/// 音频引擎启动时间（用于日志中的相对时间戳）
-static START_ELAPSED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 /// 是否为开发环境（debug 构建 = true，release 构建 = false）
 pub fn is_dev() -> bool {
@@ -25,9 +23,9 @@ pub fn debug_log_dev(msg: &str) {
 /// 写入调试日志到文件（打包后可用）
 /// 热路径安全：try_lock 拿不到锁就跳过，绝不阻塞音频线程
 pub fn debug_log(msg: &str) {
-    let start = START_ELAPSED.get_or_init(|| std::time::Instant::now());
-    let elapsed_ms = start.elapsed().as_millis();
-    let line = format!("[{:>8}ms] {}\n", elapsed_ms, msg);
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f");
+    let line = format!("[{}] {}\n", timestamp, msg);
 
     // try_lock：音频线程拿不到锁就丢弃这条日志，避免阻塞
     let mut guard = match LOG_FILE.try_lock() {
