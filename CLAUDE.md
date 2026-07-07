@@ -203,6 +203,7 @@ scripts/                # 构建/发布辅助脚本
 - **模型热切换**：切换模型不需要重启引擎。AudioEngine 通过 channel 传递 `(String, Box<dyn DenoiseModel>)` 给 DSP 线程，后台线程创建模型避免阻塞音频处理
 - **调试日志分级**：`debug_log_dev()` 仅在 debug 构建（`cfg!(debug_assertions)`）打印，release 构建零开销。生产环境只保留设备配置、健康统计、错误日志
 - **启动丢帧预热期**：DSP 线程前 100 帧的丢帧不计入统计（render 初始化期间 ring B 短暂满溢），启动时显示 0
+- **WASAPI 监听多声道设备无声**：`init_monitor` 必须用 `autoconvert: true`（和 main render 一致），否则多声道设备（如 7.1 声道游戏耳机 IKF V11 Pro）会因格式不匹配报 `DataLengthMismatch`。代码写死 stereo f32（8 bytes/帧），设备期望原生格式（如 8ch × 4 bytes = 32 bytes/帧）
 
 ## 版本号管理
 
