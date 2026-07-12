@@ -63,6 +63,9 @@ const handleToggle = async (val: boolean) => {
       await invoke('stop_bgm')
       enabled.value = false
     }
+    // 持久化 BGM 状态到 localStorage，供设备重启后恢复
+    localStorage.setItem('meowmic-bgm-enabled', String(enabled.value))
+    localStorage.setItem('meowmic-bgm-pids', JSON.stringify(Array.from(selectedPids.value)))
   } catch (e) {
     console.error('Failed to toggle BGM:', e)
   } finally {
@@ -90,6 +93,9 @@ const toggleProcess = async (pid: number) => {
         enabled.value = false
       }
     }
+    // 持久化进程选择到 localStorage
+    localStorage.setItem('meowmic-bgm-enabled', String(enabled.value))
+    localStorage.setItem('meowmic-bgm-pids', JSON.stringify(Array.from(selectedPids.value)))
   } finally {
     switching.value = false
   }
@@ -139,6 +145,30 @@ const refreshProcesses = async () => {
 
 onMounted(() => {
   loadProcesses()
+  // 从 localStorage 恢复 BGM 状态（设备重启后）
+  const savedEnabled = localStorage.getItem('meowmic-bgm-enabled') === 'true'
+  const savedPids = localStorage.getItem('meowmic-bgm-pids')
+  if (savedEnabled && savedPids) {
+    try {
+      const pids: number[] = JSON.parse(savedPids)
+      if (pids.length > 0) {
+        selectedPids.value = new Set(pids)
+        // 延迟启动 BGM，等待引擎就绪
+        setTimeout(async () => {
+          try {
+            await invoke('start_bgm', { pids })
+            enabled.value = true
+          } catch (e) {
+            // 恢复失败（进程可能已关闭），清除持久化状态
+            console.error('Failed to restore BGM:', e)
+            enabled.value = false
+            localStorage.removeItem('meowmic-bgm-enabled')
+            localStorage.removeItem('meowmic-bgm-pids')
+          }
+        }, 1000)
+      }
+    } catch {}
+  }
 })
 
 onUnmounted(() => {

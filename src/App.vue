@@ -344,6 +344,7 @@ const handleStop = async () => {
 }
 
 // 统一的 debounce restart — 防止 watcher 和 devices-changed 同时触发导致竞争
+let bgmShouldRestart = false // 重启前保存 BGM 状态，重启后恢复
 const scheduleRestart = (delay = 500) => {
   if (restartTimer) clearTimeout(restartTimer)
   restartTimer = setTimeout(async () => {
@@ -352,11 +353,27 @@ const scheduleRestart = (delay = 500) => {
     if (!isRunning.value) return
     restarting = true
     try {
+      // 重启前检查 BGM 是否正在运行（通过 localStorage 持久化的状态判断）
+      const bgmEnabled = localStorage.getItem('meowmic-bgm-enabled') === 'true'
+      const bgmPids = localStorage.getItem('meowmic-bgm-pids')
+      bgmShouldRestart = bgmEnabled && !!bgmPids && JSON.parse(bgmPids).length > 0
       await handleStop()
       if (selectedInput.value && selectedOutput.value) {
         await handleStart()
+        // 重启后恢复 BGM
+        if (bgmShouldRestart) {
+          try {
+            const pids = JSON.parse(localStorage.getItem('meowmic-bgm-pids') || '[]')
+            if (pids.length > 0) {
+              await invoke('start_bgm', { pids })
+            }
+          } catch (e) {
+            console.error('Failed to restart BGM:', e)
+          }
+        }
       }
     } finally {
+      bgmShouldRestart = false
       restarting = false
     }
   }, delay)
