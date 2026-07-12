@@ -7,6 +7,13 @@ static LOG_LINE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// 缓存的日志文件句柄（避免每次打开/关闭文件）
 static LOG_FILE: Mutex<Option<BufWriter<std::fs::File>>> = Mutex::new(None);
 
+/// 日志文件大小上限（5MB），超过时自动裁剪
+const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
+/// 每 N 次写入检查一次文件大小
+const SIZE_CHECK_INTERVAL: u32 = 200;
+/// 轮转后保留的行数
+const KEEP_LINES: usize = 2000;
+
 /// 是否为开发环境（debug 构建 = true，release 构建 = false）
 pub fn is_dev() -> bool {
     cfg!(debug_assertions)
@@ -33,7 +40,14 @@ pub fn debug_log(msg: &str) {
         Err(_) => return,
     };
     if guard.is_none() {
-        let log_path = std::env::temp_dir().join("meowmic-debug.log");
+        let dir = std::env::temp_dir().join("meowmic");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // 清理旧版日志文件（v0.2.16 之前直接放在 %TEMP% 下）
+        let old_log = std::env::temp_dir().join("meowmic-debug.log");
+        let _ = std::fs::remove_file(old_log);
+
+        let log_path = dir.join("debug.log");
         let needs_bom = !log_path.exists();
         if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
             let mut writer = BufWriter::new(f);
@@ -48,7 +62,33 @@ pub fn debug_log(msg: &str) {
         let _ = writer.write_all(line.as_bytes());
     }
 
-    LOG_LINE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let count = LOG_LINE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // 每 SIZE_CHECK_INTERVAL 次写入检查文件大小，超过上限时裁剪
+    if count % SIZE_CHECK_INTERVAL == 0 {
+        // 先 flush 确保文件大小准确
+        if let Some(ref mut writer) = *guard {
+            let _ = writer.flush();
+        }
+        drop(guard); // 释放锁后再做文件操作
+
+        let log_path = std::env::temp_dir().join("meowmic").join("debug.log");
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > MAX_LOG_SIZE_BYTES {
+                trim_log_file(&log_path, KEEP_LINES * 2, KEEP_LINES);
+            }
+        }
+    }
+}
+
+/// 重置日志文件句柄：flush + 关闭，下次 debug_log 会重新打开
+/// 用于清理日志后让新日志写入新文件
+pub fn reset_log_file() {
+    let mut guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut writer) = *guard {
+        let _ = writer.flush();
+    }
+    *guard = None;
 }
 
 /// 引擎停止时调用：flush 剩余日志 + 按需轮转文件
@@ -59,14 +99,15 @@ pub fn flush_debug_log() {
     }
     // 释放句柄后再轮转
     *guard = None;
-    let log_path = std::env::temp_dir().join("meowmic-debug.log");
-    let count = LOG_LINE_COUNT.load(Ordering::Relaxed);
-    if count > 2000 {
-        trim_log_file(&log_path, 2000, 1000);
+    let log_path = std::env::temp_dir().join("meowmic").join("debug.log");
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > MAX_LOG_SIZE_BYTES {
+            trim_log_file(&log_path, KEEP_LINES * 2, KEEP_LINES);
+        }
     }
 }
 
-/// 日志文件轮转：当行数超过 max_lines 时，只保留最后 keep_lines 行
+/// 日志文件轮转：当文件超限时，只保留最后 keep_lines 行
 fn trim_log_file(path: &std::path::Path, max_lines: usize, keep_lines: usize) {
     use std::io::{BufRead, BufReader, SeekFrom, Seek, Write};
     let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {

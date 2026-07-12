@@ -66,7 +66,7 @@ src-tauri/src/          # Rust 后端
   audio_init.rs         # 音频设备初始化（输入/输出/监听 WASAPI 客户端配置）
   audio_utils.rs        # 音频工具函数（格式转换、重采样、监听写入）
   bgm.rs                # BGM 进程捕获（WASAPI Loopback）
-  debug.rs              # 调试日志（%TEMP%\meowmic-debug.log）
+  debug.rs              # 调试日志（%TEMP%\meowmic\debug.log）
   device.rs             # 设备查找
   denoise/              # 降噪模型（mod.rs trait + rnnoise.rs + deepfilter.rs FFI）
   dsp/                  # DSP 模块（统一 DspModule trait）
@@ -92,7 +92,7 @@ scripts/                # 构建/发布辅助脚本
 
 - **WASAPI API**：`WaveFormat::new()` 参数顺序是 `(storebits, validbits, &SampleType, samplerate, channels, channel_mask)`，不是 channels 在前
 - **WASAPI 初始化**：用 `initialize_mta()` 不是 `initialize()`
-- **设备枚举**：用 `DeviceCollection::new(&Direction)` + `get_device_at_index(i)`，没有 `.iter()` 方法
+- **设备枚举**：用 `DeviceEnumerator::new()?.get_device_collection(&Direction)` + `get_device_at_index(i)` 或 `into_iter()`。`DeviceCollection` 不实现 `Send`，不能跨线程传递
 - **WASAPI Direction**：`Direction::Capture` = 录音设备（麦克风），`Direction::Render` = 播放设备（扬声器/VB-Cable）。`initialize_client` 的 direction 参数要和设备方向一致
 - **Windows PATH**：pnpm 通过 npm 全局安装后，bash 环境需通过 `node.exe pnpm.mjs` 调用，或在 PowerShell 中设置 PATH
 - **Tauri autostart 插件**：API 方法名是 `autolaunch()` 不是 `autostart()`（v3 会改名），`ManagerExt` trait 必须 `use` 到作用域；必须在 `capabilities/default.json` 声明 `autostart:allow-is-enabled`、`autostart:allow-enable`、`autostart:allow-disable`，否则权限不足
@@ -124,7 +124,7 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI 设备断开回音**：设备断开时输入流失败但输出流继续播放残余数据导致回音。解决：连续 10 次读取失败后 break 退出循环，cleanup 代码关闭 output channel 通知输出线程退出
 - **WASAPI 跨线程传递**：`wasapi` crate 的 COM 对象（`AudioClient`、`AudioRenderClient`）和 `Handle` 不实现 `Send`（含 `*mut c_void`）。在 COM MTA 模式下跨线程安全，需用 newtype wrapper + `unsafe impl Send` 封装（如 `OutputResources`）。noisegate 项目用 `windows` crate（raw COM）而非 `wasapi` crate 来实现三线程架构（capture/DSP/render），因为 `windows` crate 的 COM 对象更容易跨线程传递
 - **WASAPI 首次启动预热**：打包后首次启动，WASAPI 设备可能需要几帧才能进入稳定状态，前几帧可能是空数据。解决：启动后预热最多 3 次（每次 300ms），检测到非零信号才进入主循环；预热失败则重启流重试
-- **打包调试日志**：`env_logger::init()` 在打包后无输出。用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，格式 `[elapsed] message`
+- **打包调试日志**：`env_logger::init()` 在打包后无输出。用 `debug_log()` 写入 `%TEMP%\meowmic\debug.log`，格式 `[elapsed] message`
 - **增益控制位置**：`mic_gain` 必须在降噪**之后**应用（`audio_loop` 中 denoise 输出 → strength mixing → mic_gain），放在降噪前会放大噪音导致降噪效果变差
 - **AGC 模式切换重置**：从手动切到 AGC 时必须重置 `AgcState`（`agc.reset()`），否则旧的 smoothed_rms 和 gain 状态会导致增益突变产生杂音
 - **AGC VAD 门控**：AGC 使用独立 `VadState` 模块进行语音活动检测，基于噪声底追踪的自适应阈值（`VAD_ABOVE_NOISE=6.0`，`VAD_MIN_THRESHOLD=0.002`）。只在连续7帧检测到语音后才允许增益提升（防止噪声尖峰触发）。安静时增益冻结 + 噪声门关闭
@@ -146,14 +146,14 @@ scripts/                # 构建/发布辅助脚本
 - **WASAPI render 设备查找**：`GetDevice(PCWSTR)` 需要设备 ID（`{0.0.0.00000000}.{guid}`），但前端传的是友好名称（如 "CABLE Input (VB-Audio Virtual Cable)"）。直接调用会失败回退到默认设备。解决：失败时枚举 `EnumAudioEndpoints` 按友好名称匹配，需要 `Win32_UI_Shell_PropertiesSystem` feature 访问 `PKEY_Device_FriendlyName`
 - **WASAPI capture 设备查找同理**：`wasapi_capture.rs` 的 `find_device` 也用 `GetDevice(PCWSTR)` 查找设备，传入友好名称必然失败后回退到默认通讯设备（`eCommunications`），可能返回静音流。解决：和 render 端一样，失败时枚举设备按友好名称匹配
 - **监听缓冲区溢出**：`write_to_monitor` 每次写固定帧数不检查可用空间，导致 `0x88890006`（`AUDCLNT_BUFFER_OVERFLOW`）。解决：写入前调 `client.get_available_space_in_frames()` 获取实际可写帧数，只写能写的量，空间不足时跳过
-- **配置状态日志**：所有开关状态变更（降噪/EQ/AGC/爆炸/BGM/监听）必须用 `debug_log()` 写入 `%TEMP%\meowmic-debug.log`，方便排查用户问题。关键日志：`CONFIG_UPDATE`、`EQ_UPDATE`、`EXPLODE_MODE`、`BGM_START/STOP`、`set_monitor_mode/point`
+- **配置状态日志**：所有开关状态变更（降噪/EQ/AGC/爆炸/BGM/监听）必须用 `debug_log()` 写入 `%TEMP%\meowmic\debug.log`，方便排查用户问题。关键日志：`CONFIG_UPDATE`、`EQ_UPDATE`、`EXPLODE_MODE`、`BGM_START/STOP`、`set_monitor_mode/point`
 - **NaN/Inf 穿透音频链路**：RNNoise 模型偶尔输出 NaN/Inf，会穿透 soft limiter（`NaN > 28000.0` 为 false 不压缩）直达输出。必须在 denoise 输出后、soft limiter 内、爆炸模式内逐样本检查 `is_finite()`
 - **Soft limiter 阈值与压缩比**：阈值不能太高（28000 太接近 0dBFS），压缩比不能太温和（0.2 即 5:1 仍可能输出 30000+）。推荐阈值 24000、压缩比 0.1（10:1）、硬上限 30000
 - **EQ 弹窗与 canvas 事件冲突**：弹窗 `position: fixed` 覆盖在 canvas 上方时，canvas 会触发 `mouseleave` 导致弹窗消失。解决：canvas 的 `mouseleave` 不隐藏弹窗，改用弹窗自身的 `@mouseleave` 处理隐藏
 - **Realtek 内置声卡同名设备不是同一设备**："麦克风 (Realtek(R) Audio)" 和 "扬声器 (Realtek(R) Audio)" 共享型号名但物理端点不同，不会导致 WASAPI 死锁。same-device 检测只针对 USB 设备（正则 `/usb|cable/i`）
 - **Azure Blob Storage 不支持断点续传**：`curl -C -` 失败，下载必须一次性完成或重新开始。DNS Challenge 数据从 `dns4public.blob.core.windows.net` 下载无 resume 支持
 - **输出到扬声器导致电流麦（回声反馈）**：降噪音频 → 扬声器播放 → 麦克风拾取 → 再次降噪 → 循环产生嗡嗡声。必须使用 VB-Cable 虚拟声卡作为输出设备。监听设备变更时会自动触发完整引擎重启（emit `restart-needed` 事件 → 前端 `scheduleRestart`），确保 RNNoise 模型和 EQ 状态被重置
-- **WASAPI 监听同设备检测**：监听使用系统默认输出设备（`find_device(None, false)`），可能与输入是同一 USB 物理设备（如 K7 麦克风 + K7 耳机）。通过提取设备 ID 中的 USB VID/PID 比较，相同则跳过监听初始化，避免共享 USB 时钟导致的电流麦干扰
+- **WASAPI 监听同设备检测**：监听使用 `find_monitor_device()` 枚举非 VB-Cable 的输出设备，可能与输入是同一 USB 物理设备（如 K7 麦克风 + K7 耳机）。通过提取设备 ID 中的 USB VID/PID 比较，相同则跳过监听初始化，避免共享 USB 时钟导致的电流麦干扰
 - **监听点启动同步**：`monitor_point` 后端默认为 0（关闭），前端 localStorage 保存的值需在引擎启动后调用 `setMonitor_point` 同步，否则监听不生效。需在 `handleStart` 和 HMR 热重载恢复路径中都同步
 - **监听点必须在处理阶段之前**：监听点写入必须放在对应处理阶段**之前**（如点 2 在增益前、点 3 在增益后），否则所有点读到的是同一个变量（已被后续阶段覆盖）。常见错误：把所有监听点放在处理链路末尾
 - **设置窗口模型列表兜底**：设置窗口首次打开时，`settings-init` 事件可能因窗口未加载完而丢失。需在 `onMounted` 中直接调用 `list_denoise_models` 兜底加载
@@ -196,14 +196,17 @@ scripts/                # 构建/发布辅助脚本
 - **模型必须在主线程预加载**：`denoise::create_model()` 必须在 `audio_loop` 中、spawn DSP 线程之前调用。在 DSP 线程内部加载模型会导致启动时原始音频直通产生回声（模型加载期间 capture 帧堆积，DSP 开始处理后时序混乱）。参考 noisegate-ref：模型在主线程加载完再启动管线
 - **启动顺序 DSP → capture → render**：必须和 noisegate-ref 一致。先启动 render 会导致预填充静音后等待时间过长，先启动 capture 会导致帧堆积。DSP 线程先 spawn 并等待数据，capture 启动后立即被消费
 - **监听用独立 render 线程**：监听功能用第二个 `WasapiRender` 线程（和主 render 完全一样的 `windows` crate 代码路径），不用 `wasapi` crate 的 `write_to_device`。DSP 线程把帧推入独立的 ring M，监听 render 线程从 ring M 拉取。避免 `wasapi` crate 和 `windows` crate 混用导致的缓冲区管理不一致
-- **debug_log 文件需要 UTF-8 BOM**：`debug_log()` 写入 `%TEMP%\meowmic-debug.log`，新文件必须写入 BOM `[0xEF, 0xBB, 0xBF]`，否则 Windows 用 ANSI/Big5 编码读取导致中文设备名乱码（如"鑰虫満"代替"耳机"）
+- **debug_log 文件需要 UTF-8 BOM**：`debug_log()` 写入 `%TEMP%\meowmic\debug.log`，新文件必须写入 BOM `[0xEF, 0xBB, 0xBF]`，否则 Windows 用 ANSI/Big5 编码读取导致中文设备名乱码（如"鑰虫満"代替"耳机"）
+- **debug_log 文件大小限制**：5MB 硬上限（`MAX_LOG_SIZE_BYTES`），每 200 次写入检查文件大小，超限裁剪到 2000 行。引擎停止时兜底检查。`flush_debug_log()` 改为按文件大小（不再按行数）判断是否轮转
+- **清理日志必须重置句柄**：`clear_logs` 删除 `debug.log` 后必须调 `reset_log_file()` 关闭缓存的 `BufWriter`。否则后续 `debug_log` 调用不会创建新文件（`guard.is_none()` 为 false），日志全部丢失
 - **监听开关必须同步 monitorPoint**：前端 `handleMonitorChange` 开启监听时，必须同时调用 `setMonitorPoint(monitorPoint.value)`。否则 `mon_point` 为 0，监听流不会启动，用户听不到声音
 - **WASAPI 物理设备启动回声**：输出到 Realtek 耳机等物理音频设备时，启动后有 1-2 秒回声然后自动消失。输出到 VB-Cable（虚拟声卡）无此问题。原因未确定，已发 Issue：https://github.com/NanCheng-L/MeowMic/issues/3
 - **DeepFilterNet3 reduce_mask 参数**：`reduce_mask` 控制频带掩码合并方式，0=NONE(Independent)/1=MAX/2=MEAN。MAX 对瞬态噪声（鼠标点击）处理更稳定，推荐用 1
 - **模型热切换**：切换模型不需要重启引擎。AudioEngine 通过 channel 传递 `(String, Box<dyn DenoiseModel>)` 给 DSP 线程，后台线程创建模型避免阻塞音频处理
-- **调试日志分级**：`debug_log_dev()` 仅在 debug 构建（`cfg!(debug_assertions)`）打印，release 构建零开销。生产环境只保留设备配置、健康统计、错误日志
+- **调试日志分级**：`debug_log_dev()` 仅在 debug 构建（`cfg!(debug_assertions)`）打印，release 构建零开销。BGM 线程关键状态（启动/停止/peak level/错误）用 `debug_log()` 在 release 也写日志，方便排查用户问题
 - **启动丢帧预热期**：DSP 线程前 100 帧的丢帧不计入统计（render 初始化期间 ring B 短暂满溢），启动时显示 0
 - **WASAPI 监听多声道设备无声**：`init_monitor` 必须用 `autoconvert: true`（和 main render 一致），否则多声道设备（如 7.1 声道游戏耳机 IKF V11 Pro）会因格式不匹配报 `DataLengthMismatch`。代码写死 stereo f32（8 bytes/帧），设备期望原生格式（如 8ch × 4 bytes = 32 bytes/帧）
+- **VB-Cable 污染默认设备**：安装 VB-Cable 后系统默认输入/输出设备都变为虚拟线缆（CABLE Input / CABLE Output）。`init_audio_devices` 和 `init_monitor` 必须自动跳过 VB-Cable 设备：输入端用 `find_first_real_capture_device()` 找真实麦克风，监听端用 `find_monitor_device()` 枚举非 VB-Cable 的输出设备。`is_virtual_cable()` 通过设备名匹配 "cable input" / "cable output" / "vb-audio"
 
 ## 版本号管理
 

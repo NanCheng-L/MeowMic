@@ -36,6 +36,33 @@ const availableModels = ref<string[]>([])
 const recording = ref<string | null>(null) // 当前正在录制的快捷键名称
 const hotkeyError = ref('')
 const saving = ref(false)
+const logsCleared = ref(false)
+const logSize = ref('')
+
+const fetchLogSize = async () => {
+  try {
+    logSize.value = await invoke('get_log_size')
+  } catch {}
+}
+
+const handleClearLogs = async () => {
+  try {
+    await invoke('clear_logs')
+    logsCleared.value = true
+    logSize.value = '0 B'
+    setTimeout(() => { logsCleared.value = false }, 2000)
+  } catch (e) {
+    console.error('Failed to clear logs:', e)
+  }
+}
+
+const handleOpenLogDir = async () => {
+  try {
+    await invoke('open_log_dir')
+  } catch (e) {
+    console.error('Failed to open log directory:', e)
+  }
+}
 
 let recordedKeys: string[] = []
 let keydownHandler: ((e: KeyboardEvent) => void) | null = null
@@ -180,7 +207,10 @@ onMounted(async () => {
     availableModels.value = await invoke<string[]>('list_denoise_models')
   } catch {}
 
+  fetchLogSize()
+
   unlistenInit = await listen<any>('settings-init', (event) => {
+    fetchLogSize()
     // 首次接收：填充本地配置；后续：仅同步设备/模型列表（不覆盖用户正在编辑的值）
     const p = event.payload
     if (!settingsInitialized) {
@@ -512,6 +542,22 @@ const handleClose = () => {
 
       <!-- 检查更新 -->
       <UpdateChecker />
+
+      <!-- 日志管理 -->
+      <section class="section">
+        <h2>{{ t('settings.logManagement') }}</h2>
+        <div class="log-actions">
+          <span class="log-label">{{ t('settings.logLabel') }}（{{ logSize }}）</span>
+          <div class="log-buttons">
+            <button class="log-btn" @click="handleClearLogs">
+              {{ logsCleared ? t('settings.clearLogsConfirm') : t('settings.clearLogs') }}
+            </button>
+            <button class="log-btn" @click="handleOpenLogDir">
+              {{ t('settings.openLogDir') }}
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
 
     <div class="settings-footer">
@@ -944,5 +990,48 @@ html, body {
 
 .theme-name {
   font-weight: 500;
+}
+
+/* Log actions */
+.log-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.log-label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.log-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.log-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--text-primary);
+  transition: all 0.2s;
+}
+
+.log-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.log-size {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-family: 'DM Mono', monospace;
+  min-width: 60px;
+  display: flex;
+  align-items: center;
 }
 </style>

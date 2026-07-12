@@ -42,6 +42,18 @@ pub fn init_audio_devices(
 ) -> Result<AudioDevices, String> {
     let input_device = find_device(input_device_name, true)
         .map_err(|e| format!("Failed to find input device: {}", e))?;
+
+    // 如果输入设备是 VB-Cable（用户未手动选设备时，安装 VB-Cable 会污染默认输入），自动跳过
+    let input_name = input_device.get_friendlyname().unwrap_or_default();
+    let input_device = if input_device_name.is_none() && is_virtual_cable(&input_name) {
+        log::warn!("Default input device is '{}', skipping virtual cable", input_name);
+        debug_log(&format!("Input: default '{}' is virtual cable, finding real input", input_name));
+        find_first_real_capture_device()
+            .map_err(|e| format!("Failed to find real input device: {}", e))?
+    } else {
+        input_device
+    };
+
     let output_device = find_device(output_device_name, false)
         .map_err(|e| format!("Failed to find output device: {}", e))?;
 
@@ -150,7 +162,90 @@ pub fn init_audio_devices(
     })
 }
 
-/// 初始化监听客户端（系统默认输出设备）
+/// 枚举所有录音设备，返回第一个非 VB-Cable 的设备
+fn find_first_real_capture_device() -> Result<Device, String> {
+    let enumerator = DeviceEnumerator::new()
+        .map_err(|e| format!("Failed to create device enumerator: {}", e))?;
+    let collection = enumerator
+        .get_device_collection(&Direction::Capture)
+        .map_err(|e| format!("Failed to get capture device collection: {}", e))?;
+
+    for result in collection.into_iter() {
+        if let Ok(dev) = result {
+            let name = dev.get_friendlyname().unwrap_or_default();
+            if !is_virtual_cable(&name) {
+                debug_log(&format!("Input: found real device '{}'", name));
+                return Ok(dev);
+            }
+        }
+    }
+    Err("No real capture device found".into())
+}
+
+/// 检查设备是否为 VB-Audio Virtual Cable（虚拟声卡不适合做监听输出）
+fn is_virtual_cable(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("cable input") || lower.contains("cable output") || lower.contains("vb-audio")
+}
+
+/// 枚举所有输出设备，跳过 VB-Cable 和与输入同 USB 的设备，返回第一个可用的
+fn find_monitor_device(input_device_id: &str) -> Result<Device, String> {
+    use wasapi::Direction;
+
+    let enumerator = DeviceEnumerator::new()
+        .map_err(|e| format!("Failed to create device enumerator: {}", e))?;
+    let collection = enumerator
+        .get_device_collection(&Direction::Render)
+        .map_err(|e| format!("Failed to get render device collection: {}", e))?;
+
+    // 先尝试默认设备
+    if let Ok(default) = enumerator.get_default_device(&Direction::Render) {
+        let name = default.get_friendlyname().unwrap_or_default();
+        let id = default.get_id().unwrap_or_default();
+        if !is_virtual_cable(&name) && !is_same_usb_device(&id, input_device_id) {
+            debug_log(&format!("Monitor: using default device '{}'", name));
+            return Ok(default);
+        }
+        debug_log(&format!("Monitor: default device '{}' skipped (virtual cable or same USB)", name));
+    }
+
+    // 默认设备不可用，遍历所有设备找非 VB-Cable 的
+    for (i, result) in collection.into_iter().enumerate() {
+        if let Ok(dev) = result {
+            let name = dev.get_friendlyname().unwrap_or_default();
+            let id = dev.get_id().unwrap_or_default();
+            if !is_virtual_cable(&name) && !is_same_usb_device(&id, input_device_id) {
+                debug_log(&format!("Monitor: fallback to device '{}' (index={})", name, i));
+                return Ok(dev);
+            }
+        }
+    }
+
+    Err("No suitable monitor output device found (all devices are virtual cables or same USB)".into())
+}
+
+/// 检查两个设备 ID 是否共享同一个 USB VID/PID
+fn is_same_usb_device(id_a: &str, id_b: &str) -> bool {
+    let extract_usb_id = |id: &str| -> String {
+        if let Some(start) = id.find("vid_") {
+            let rest = &id[start..];
+            if let Some(end) = rest.find('&') {
+                if let Some(pid_start) = rest.find("pid_") {
+                    let pid_rest = &rest[pid_start..];
+                    if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
+                        return rest[..end + pid_end].to_string();
+                    }
+                }
+            }
+        }
+        String::new()
+    };
+    let a = extract_usb_id(id_a);
+    let b = extract_usb_id(id_b);
+    !a.is_empty() && a == b
+}
+
+/// 初始化监听客户端（非 VB-Cable 的输出设备）
 pub fn init_monitor(
     input_device_id: &str,
     output_sample_rate: u32,
@@ -170,47 +265,14 @@ pub fn init_monitor(
     };
 
     debug_log(&format!(
-        "Monitor: looking for default output device... input_device_id={}",
+        "Monitor: looking for output device... input_device_id={}",
         input_device_id
     ));
-    match find_device(None, false) {
+    match find_monitor_device(input_device_id) {
         Ok(monitor_output) => {
             let device_id = monitor_output.get_id().unwrap_or_default();
             let device_name = monitor_output.get_friendlyname().unwrap_or_default();
-            debug_log(&format!("Monitor: default output = '{}' id='{}'", device_name, device_id));
-
-            // 检查同 USB 设备冲突
-            let extract_usb_id = |id: &str| -> String {
-                if let Some(start) = id.find("vid_") {
-                    let rest = &id[start..];
-                    if let Some(end) = rest.find('&') {
-                        if let Some(pid_start) = rest.find("pid_") {
-                            let pid_rest = &rest[pid_start..];
-                            if let Some(pid_end) = pid_rest.find(|c: char| c == '&' || c == '#') {
-                                return rest[..end + pid_end].to_string();
-                            }
-                        }
-                    }
-                }
-                String::new()
-            };
-            let monitor_usb = extract_usb_id(&device_id);
-            let input_usb = extract_usb_id(input_device_id);
-            debug_log(&format!(
-                "Monitor USB check: monitor='{}' input='{}'",
-                monitor_usb, input_usb
-            ));
-            if !monitor_usb.is_empty() && monitor_usb == input_usb {
-                log::warn!(
-                    "Monitor skipped: device '{}' shares USB ID with input",
-                    device_name
-                );
-                debug_log(&format!(
-                    "Monitor: SKIPPED - '{}' same USB device as input",
-                    device_name
-                ));
-                return state;
-            }
+            debug_log(&format!("Monitor: selected device '{}' id='{}'", device_name, device_id));
 
             if let Ok(mut m_client) = monitor_output.get_iaudioclient() {
                 // 使用设备原生格式（和 render 一样），不用 autoconvert

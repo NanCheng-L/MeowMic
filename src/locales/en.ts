@@ -215,5 +215,10 @@ export default {
     installUpdate: 'Install & Restart',
     downloadError: 'Download failed',
     installReady: 'Download complete, click to install',
+    logManagement: 'Log Management',
+    logLabel: 'Log',
+    clearLogs: 'Clear Logs',
+    clearLogsConfirm: 'Logs cleared',
+    openLogDir: 'Open Log Directory',
   },
 }

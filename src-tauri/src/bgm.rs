@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use wasapi::*;
 
-use crate::debug::debug_log_dev;
+use crate::debug::debug_log;
 
 /// 列出正在播放音频的进程（使用 IAudioSessionManager2 枚举所有活跃音频会话）
 #[cfg(windows)]
@@ -500,12 +500,15 @@ pub fn bgm_process_loop(
         SetThreadPriority(GetCurrentThread(), 2); // THREAD_PRIORITY_HIGHEST
     }
 
-    debug_log_dev(&format!("bgm_loop[{}]: initializing MTA", pid));
+    debug_log(&format!("BGM_INIT[pid={}]: creating loopback client", pid));
     let _ = initialize_mta().ok();
 
-    debug_log_dev(&format!("bgm_loop[{}]: creating loopback client", pid));
     let mut client = AudioClient::new_application_loopback_client(pid, true)
-        .map_err(|e| format!("Failed to create process loopback client: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to create loopback client for pid={}: {}", pid, e);
+            debug_log(&format!("BGM_ERROR: {}", msg));
+            msg
+        })?;
     if !running.load(Ordering::Acquire) {
         return Ok(()); // 被要求停止，释放 WASAPI 资源
     }
@@ -524,35 +527,47 @@ pub fn bgm_process_loop(
     );
 
     // 进程 loopback 不支持 get_device_period()，用 0 让 WASAPI 用默认值
-    debug_log_dev(&format!("bgm_loop[{}]: initializing client", pid));
     let bgm_mode = StreamMode::EventsShared {
         autoconvert: true,
         buffer_duration_hns: 0,
     };
     client
         .initialize_client(&format, &Direction::Capture, &bgm_mode)
-        .map_err(|e| format!("Failed to initialize BGM client: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to initialize BGM client for pid={}: {}", pid, e);
+            debug_log(&format!("BGM_ERROR: {}", msg));
+            msg
+        })?;
     if !running.load(Ordering::Acquire) {
         return Ok(());
     }
 
-    debug_log_dev(&format!("bgm_loop[{}]: setting event handle", pid));
     let event_handle = client
         .set_get_eventhandle()
-        .map_err(|e| format!("Failed to set BGM event handle: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to set event handle for pid={}: {}", pid, e);
+            debug_log(&format!("BGM_ERROR: {}", msg));
+            msg
+        })?;
 
-    debug_log_dev(&format!("bgm_loop[{}]: getting capture client", pid));
     let capture = client
         .get_audiocaptureclient()
-        .map_err(|e| format!("Failed to get BGM capture client: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to get capture client for pid={}: {}", pid, e);
+            debug_log(&format!("BGM_ERROR: {}", msg));
+            msg
+        })?;
     if !running.load(Ordering::Acquire) {
         return Ok(());
     }
 
-    debug_log_dev(&format!("bgm_loop[{}]: starting stream", pid));
     client
         .start_stream()
-        .map_err(|e| format!("Failed to start BGM stream: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to start BGM stream for pid={}: {}", pid, e);
+            debug_log(&format!("BGM_ERROR: {}", msg));
+            msg
+        })?;
 
     let frame_size = 480;
     let mut buffer = vec![0u8; frame_size * bytes_per_frame];
@@ -563,10 +578,11 @@ pub fn bgm_process_loop(
     let mut buf_idx: usize = 0;
 
     log::info!("BGM process loopback started for pid={}", pid);
-    debug_log_dev(&format!("bgm_loop[{}]: stream started, entering main loop", pid));
+    debug_log(&format!("BGM_START[pid={}]: loopback stream started, 2ch f32 48kHz", pid));
 
     let mut frame_count: u64 = 0;
     let mut consecutive_errors: u32 = 0;
+    let mut consecutive_zero_frames: u32 = 0;
 
     while running.load(Ordering::Acquire) {
         if event_handle.wait_for_event(100).is_err() {
@@ -576,10 +592,16 @@ pub fn bgm_process_loop(
 
         match capture.read_from_device(&mut buffer) {
             Ok((frames_read, _flags)) => {
-                consecutive_errors = 0; // 重置错误计数
+                consecutive_errors = 0;
                 if frames_read == 0 {
+                    consecutive_zero_frames += 1;
+                    // 连续 500 帧（约 10 秒）零帧 → 可能是独占模式或进程无音频
+                    if consecutive_zero_frames == 500 || consecutive_zero_frames == 5000 {
+                        debug_log(&format!("BGM_WARN[pid={}]: {} consecutive zero frames, target may be using exclusive mode or has no audio output", pid, consecutive_zero_frames));
+                    }
                     continue;
                 }
+                consecutive_zero_frames = 0;
 
                 // 自适应漂移补偿：output_pending 水位过高时，audio_loop 设置 skip_rate > 0，
                 // 此处按概率跳过当前帧，从源头减缓 BGM 数据流入，避免 output_pending 堆积。
@@ -621,22 +643,19 @@ pub fn bgm_process_loop(
                 // （channels 始终为 2，mono 分支不会触发）
 
                 frame_count += 1;
+                // 每 100 帧（约 2 秒）记录一次 peak level（release 也写日志，便于排查）
                 if frame_count % 100 == 1 {
                     let peak = samples.iter().map(|s| s.abs()).fold(0i16, i16::max);
-                    debug_log_dev(&format!("bgm_loop[{}]: frame {} ok, {} samples, peak={}", pid, frame_count, samples.len(), peak));
+                    debug_log(&format!("BGM_STATUS[pid={}]: frame={} samples={} peak={}", pid, frame_count, samples.len(), peak));
                 }
 
                 // 非阻塞发送，channel 满时短暂等待并检查退出标志
-                let send_len = samples.len();
                 let mut samples_to_send = Some(samples);
                 while let Some(s) = samples_to_send.take() {
                     match sender.try_send(s) {
                         Ok(_) => {
                             // 切换到下一个 buffer（刚发送的那个被 channel 持有）
                             buf_idx = (buf_idx + 1) % buf_pool.len();
-                            if frame_count % 100 == 1 {
-                                debug_log_dev(&format!("bgm_loop[{}]: sent {} samples to channel", pid, send_len));
-                            }
                             break;
                         }
                         Err(crossbeam_channel::TrySendError::Full(s)) => {
@@ -655,7 +674,7 @@ pub fn bgm_process_loop(
                 log::warn!("Failed to read BGM: {} (consecutive: {})", e, consecutive_errors);
                 if consecutive_errors >= 10 {
                     log::warn!("BGM target process likely exited, stopping loopback for pid={}", pid);
-                    debug_log_dev(&format!("bgm_loop[{}]: exiting after {} consecutive errors", pid, consecutive_errors));
+                    debug_log(&format!("BGM_EXIT[pid={}]: {} consecutive read errors, stream stopped", pid, consecutive_errors));
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(1));
@@ -664,7 +683,7 @@ pub fn bgm_process_loop(
     }
 
     client.stop_stream().ok();
-    log::info!("BGM process loopback stopped");
+    debug_log(&format!("BGM_STOP[pid={}]: loopback stream stopped after {} frames", pid, frame_count));
 
     Ok(())
 }

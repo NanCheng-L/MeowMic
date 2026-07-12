@@ -215,5 +215,10 @@ export default {
     installUpdate: '安装并重启',
     downloadError: '下载失败',
     installReady: '下载完成，点击安装',
+    logManagement: '日志管理',
+    logLabel: '日志',
+    clearLogs: '清理日志',
+    clearLogsConfirm: '日志已清理',
+    openLogDir: '打开日志目录',
   },
 }

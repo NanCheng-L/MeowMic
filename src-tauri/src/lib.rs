@@ -494,6 +494,47 @@ fn list_denoise_models() -> Vec<&'static str> {
     denoise::list_models()
 }
 
+#[tauri::command]
+fn get_log_size() -> Result<String, String> {
+    let log_path = std::env::temp_dir().join("meowmic").join("debug.log");
+    if !log_path.exists() {
+        return Ok("0 B".into());
+    }
+    let bytes = std::fs::metadata(&log_path)
+        .map_err(|e| format!("Failed to read log size: {}", e))?
+        .len();
+    let size = if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    };
+    Ok(size)
+}
+
+#[tauri::command]
+fn clear_logs() -> Result<(), String> {
+    let log_path = std::env::temp_dir().join("meowmic").join("debug.log");
+    if log_path.exists() {
+        std::fs::remove_file(&log_path).map_err(|e| format!("Failed to delete log: {}", e))?;
+    }
+    // 重置缓存句柄，让下次 debug_log 创建新文件
+    crate::debug::reset_log_file();
+    Ok(())
+}
+
+#[tauri::command]
+fn open_log_dir() -> Result<(), String> {
+    let dir = std::env::temp_dir().join("meowmic");
+    let _ = std::fs::create_dir_all(&dir);
+    std::process::Command::new("explorer")
+        .arg(dir.to_str().unwrap_or_default())
+        .spawn()
+        .map_err(|e| format!("Failed to open directory: {}", e))?;
+    Ok(())
+}
+
 pub fn run() {
     env_logger::init();
 
@@ -540,6 +581,9 @@ pub fn run() {
             get_eq_frequencies,
             list_denoise_models,
             install_vb_cable,
+            clear_logs,
+            open_log_dir,
+            get_log_size,
         ])
         .setup(move |app| {
             // 设置 AppHandle 到 AudioEngine，用于 emit 事件
