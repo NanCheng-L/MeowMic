@@ -8,14 +8,29 @@ const props = defineProps<{
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 let animationId: number | null = null
 let currentData: number[] = []
+let hasData = false
 
 // 采样率 48kHz，480 样本 → 32 bands，每 band ≈ 750Hz
 const SAMPLE_RATE = 48000
 const BANDS = 32
 const freqPerBand = SAMPLE_RATE / 2 / BANDS // ≈ 750Hz
 
-// 频率标签位置（Hz）
-const freqLabels = [0, 1000, 2000, 5000, 10000, 20000]
+const freqLabels = [0, 5000, 10000, 15000, 20000]
+
+// 复用 gradient 对象，避免每帧每 bar 创建新的
+const gradients: CanvasGradient[] = []
+
+function ensureGradients(ctx: CanvasRenderingContext2D, barCount: number, height: number) {
+  if (gradients.length === barCount) return
+  gradients.length = 0
+  for (let i = 0; i < barCount; i++) {
+    const g = ctx.createLinearGradient(0, height, 0, 0)
+    g.addColorStop(0, '#10b981')
+    g.addColorStop(0.6, '#f59e0b')
+    g.addColorStop(1, '#ef4444')
+    gradients.push(g)
+  }
+}
 
 const drawFrame = () => {
   const canvas = canvasRef.value
@@ -37,21 +52,21 @@ const drawFrame = () => {
     const gap = 2
     const barWidth = (width - (barCount - 1) * gap) / barCount
 
-    data.forEach((value, i) => {
+    ensureGradients(ctx, barCount, specHeight)
+
+    for (let i = 0; i < barCount; i++) {
+      const value = data[i]
       const barHeight = value * specHeight
       const x = i * (barWidth + gap)
       const y = specHeight - barHeight
 
-      const gradient = ctx.createLinearGradient(x, specHeight, x, y)
-      gradient.addColorStop(0, '#10b981')
-      gradient.addColorStop(0.6, '#f59e0b')
-      gradient.addColorStop(1, '#ef4444')
+      if (barHeight <= 0) continue
 
-      ctx.fillStyle = gradient
+      ctx.fillStyle = gradients[i]
       ctx.beginPath()
       ctx.roundRect(x, y, barWidth, barHeight, [2, 2, 0, 0])
       ctx.fill()
-    })
+    }
   }
 
   drawLabels(ctx, width, labelHeight, specHeight)
@@ -59,7 +74,7 @@ const drawFrame = () => {
 
 const draw = () => {
   drawFrame()
-  if (currentData.length > 0) {
+  if (hasData) {
     animationId = requestAnimationFrame(draw)
   } else {
     animationId = null
@@ -69,6 +84,13 @@ const draw = () => {
 const scheduleDraw = () => {
   if (!animationId) {
     animationId = requestAnimationFrame(draw)
+  }
+}
+
+const stopDraw = () => {
+  if (animationId) {
+    cancelAnimationFrame(animationId)
+    animationId = null
   }
 }
 
@@ -83,13 +105,11 @@ function drawLabels(ctx: CanvasRenderingContext2D, width: number, _labelHeight: 
     if (x < 0 || x > width) continue
 
     const label = freq >= 1000 ? `${freq / 1000}k` : `${freq}`
-    // 0Hz 左对齐，20k 右对齐，其余居中
     if (freq === 0) ctx.textAlign = 'left'
     else if (freq === 20000) ctx.textAlign = 'right'
     else ctx.textAlign = 'center'
     ctx.fillText(label, x, specHeight + 14)
 
-    // 画小刻度线
     ctx.strokeStyle = '#334155'
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -106,15 +126,21 @@ const resize = () => {
   if (parent) {
     canvas.width = parent.clientWidth
     canvas.height = parent.clientHeight
+    gradients.length = 0
   }
 }
 
 watch(() => props.data, (newData) => {
   if (newData && newData.length > 0) {
     currentData = newData
+    hasData = true
     scheduleDraw()
+  } else {
+    hasData = false
+    currentData = []
+    stopDraw()
   }
-}, { deep: true })
+})
 
 onMounted(() => {
   resize()
@@ -124,9 +150,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', resize)
-  if (animationId) {
-    cancelAnimationFrame(animationId)
-  }
+  stopDraw()
 })
 </script>
 

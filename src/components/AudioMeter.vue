@@ -21,6 +21,9 @@ const displayLevel = computed(() => {
   return `${props.level.toFixed(1)} dB`
 })
 
+let cachedW = 0
+let cachedH = 0
+
 function getColors() {
   const style = getComputedStyle(document.documentElement)
   return {
@@ -40,10 +43,19 @@ function drawMeter() {
   const dpr = window.devicePixelRatio || 1
   const w = canvas.clientWidth
   const h = canvas.clientHeight || 8
-  canvas.width = w * dpr
-  canvas.height = h * dpr
+  const bw = w * dpr
+  const bh = h * dpr
 
-  ctx.scale(dpr, dpr)
+  // 只在尺寸或 DPR 变化时重设 canvas，避免强制 GPU 重新分配位图
+  if (bw !== cachedW || bh !== cachedH) {
+    canvas.width = bw
+    canvas.height = bh
+    cachedW = bw
+    cachedH = bh
+  }
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
 
   const colors = getColors()
   const gap = 2
@@ -71,7 +83,11 @@ let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
   const canvas = canvasRef.value
   if (canvas) {
-    resizeObserver = new ResizeObserver(drawMeter)
+    resizeObserver = new ResizeObserver(() => {
+      cachedW = 0 // 强制重设 canvas
+      cachedH = 0
+      drawMeter()
+    })
     resizeObserver.observe(canvas)
   }
   drawMeter()
