@@ -171,6 +171,7 @@ export default {
     faq5Q: 'Bluetooth headset audio quality drops / enters call mode?',
     faq5A: 'Bluetooth headsets can only use one mode at a time: A2DP (high-quality stereo playback) or HFP (low-quality call mode with microphone). When the app activates the Bluetooth headset\'s microphone, Windows automatically switches to call mode, causing muffled audio. Solution: select a USB or wired microphone as input instead of the Bluetooth headset\'s mic, so the headset stays in high-quality playback mode.',
     follow: 'Follow the Author',
+    afdian: 'Afdian',
     gotIt: 'Got it',
   },
   settings: {
