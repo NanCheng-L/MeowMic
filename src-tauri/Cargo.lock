@@ -2357,6 +2357,7 @@ dependencies = [
  "ort",
  "parking_lot",
  "ringbuf",
+ "rustfft",
  "serde",
  "serde_json",
  "tauri",

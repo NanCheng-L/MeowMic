@@ -38,6 +38,7 @@ chrono = "0.4"
 muda = "0.19"
 nnnoiseless = { version = "0.5.2", default-features = false }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+rustfft = "6"
 libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]

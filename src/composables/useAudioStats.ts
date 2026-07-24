@@ -9,6 +9,7 @@ interface AudioStats {
   cpu_usage: number
   frames_processed: number
   spectrum: number[]
+  spectrum_out: number[]
   frames_dropped: number
 }
 
@@ -21,6 +22,7 @@ const sharedStats: AudioStats = {
   cpu_usage: 0,
   frames_processed: 0,
   spectrum: [],
+  spectrum_out: [],
   frames_dropped: 0,
 }
 
@@ -44,6 +46,7 @@ export function useAudioStats() {
         sharedStats.frames_dropped = newStats.frames_dropped
         // spectrum 是新数组（来自 JSON parse），直接替换
         sharedStats.spectrum = newStats.spectrum
+        sharedStats.spectrum_out = newStats.spectrum_out
         // 触发 Vue 响应式
         stats.value = { ...sharedStats }
       } catch (e) {

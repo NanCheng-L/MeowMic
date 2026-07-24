@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, Receiver, Sender};
+﻿use crossbeam_channel::{bounded, Receiver, Sender};
 use crate::denoise::{self, FRAME_SIZE};
 use crate::dsp::DspModule;
 use crate::eq::EqConfig;
@@ -17,10 +17,10 @@ use tauri::AppHandle;
 use crate::debug::{debug_log, debug_log_dev, flush_debug_log};
 use crate::audio_utils::{calculate_rms, compute_spectrum_into, write_to_monitor};
 
-/// Ring buffer 帧容量：8 帧 ≈ 80ms headroom（参考 noisegate）
+/// Ring buffer 甯у閲忥細8 甯?鈮?80ms headroom锛堝弬鑰?noisegate锛?
 const RING_FRAMES: usize = 8;
 
-/// 监听点写入宏：检查条件后写入监听设备
+/// 鐩戝惉鐐瑰啓鍏ュ畯锛氭鏌ユ潯浠跺悗鍐欏叆鐩戝惉璁惧
 macro_rules! monitor_write {
     ($monitor:expr, $target:expr, $current:expr, $enabled:expr, $samples:expr, $resample:expr) => {
         if $enabled && $current == $target && $monitor.was_streaming && $monitor.render.is_some() {
@@ -82,7 +82,8 @@ pub struct AudioStats {
     pub latency_ms: f32,
     pub cpu_usage: f32,
     pub frames_processed: u64,
-    pub spectrum: [f32; 32],
+    pub spectrum: Vec<f32>,
+    pub spectrum_out: Vec<f32>,
     pub frames_dropped: u64,
 }
 
@@ -110,11 +111,11 @@ pub struct AudioEngine {
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     bgm_thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     model_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
-    /// 模型热切换 channel（发送端，传递已创建好的模型）
+    /// 妯″瀷鐑垏鎹?channel锛堝彂閫佺锛屼紶閫掑凡鍒涘缓濂界殑妯″瀷锛?
     model_switch_sender: Sender<(String, Box<dyn denoise::DenoiseModel>)>,
-    /// 模型热切换 channel（接收端，传递给 DSP 线程）
+    /// 妯″瀷鐑垏鎹?channel锛堟帴鏀剁锛屼紶閫掔粰 DSP 绾跨▼锛?
     model_switch_receiver: Receiver<(String, Box<dyn denoise::DenoiseModel>)>,
-    /// 资源目录路径（用于加载模型）
+    /// 璧勬簮鐩綍璺緞锛堢敤浜庡姞杞芥ā鍨嬶級
     resource_dir: std::sync::Mutex<Option<std::path::PathBuf>>,
     app_handle: std::sync::Mutex<Option<AppHandle>>,
     lifecycle_lock: std::sync::Mutex<()>,
@@ -199,7 +200,7 @@ impl AudioEngine {
         }
         self.stop_inner();
 
-        // 保存 resource_dir 供 switch_model 使用
+        // 淇濆瓨 resource_dir 渚?switch_model 浣跨敤
         *self.resource_dir.lock().unwrap() = resource_dir.clone();
 
         let running = self.running.clone();
@@ -251,7 +252,7 @@ impl AudioEngine {
         if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             let _ = handle.join();
         }
-        // 必须设 bgm_thread_running（BGM 线程读的 flag），不是 bgm_running
+        // 蹇呴』璁?bgm_thread_running锛圔GM 绾跨▼璇荤殑 flag锛夛紝涓嶆槸 bgm_running
         self.bgm_thread_running.lock().store(false, Ordering::Release);
         self.bgm_was_active.store(false, Ordering::Release);
         if let Some(handle) = self.bgm_thread_handle.lock().unwrap().take() {
@@ -269,8 +270,8 @@ impl AudioEngine {
     }
     pub fn get_eq_config(&self) -> EqConfig { self.eq_config.read().clone() }
 
-    /// 热切换降噪模型（不重启引擎）
-    /// 在后台线程创建新模型，创建完成后发送到 DSP 线程替换
+    /// 鐑垏鎹㈤檷鍣ā鍨嬶紙涓嶉噸鍚紩鎿庯級
+    /// 鍦ㄥ悗鍙扮嚎绋嬪垱寤烘柊妯″瀷锛屽垱寤哄畬鎴愬悗鍙戦€佸埌 DSP 绾跨▼鏇挎崲
     pub fn switch_model(&self, model_name: String) -> Result<(), String> {
         if !self.running.load(Ordering::Acquire) {
             return Err("Engine is not running".to_string());
@@ -279,12 +280,12 @@ impl AudioEngine {
         let sender = self.model_switch_sender.clone();
         let resource_dir = self.resource_dir.lock().unwrap().clone();
 
-        // 后台线程创建模型，避免阻塞 DSP 线程
+        // 鍚庡彴绾跨▼鍒涘缓妯″瀷锛岄伩鍏嶉樆濉?DSP 绾跨▼
         std::thread::Builder::new()
             .name("model-loader".into())
             .spawn(move || {
                 let new_model = denoise::create_model(&model_name, resource_dir.as_deref());
-                // 非阻塞发送，channel 满说明已有切换请求，丢弃本次
+                // 闈為樆濉炲彂閫侊紝channel 婊¤鏄庡凡鏈夊垏鎹㈣姹傦紝涓㈠純鏈
                 let _ = sender.try_send((model_name, new_model));
             })
             .map_err(|e| format!("Failed to spawn model loader: {}", e))?;
@@ -313,12 +314,12 @@ impl AudioEngine {
     }
 
     pub fn stop_bgm(&self) {
-        // 通知 BGM 线程退出（bgm_thread_running 是线程读的 flag）
+        // 閫氱煡 BGM 绾跨▼閫€鍑猴紙bgm_thread_running 鏄嚎绋嬭鐨?flag锛?
         self.bgm_thread_running.lock().store(false, Ordering::Release);
         if let Some(handle) = self.bgm_thread_handle.lock().unwrap().take() {
             let _ = handle.join();
         }
-        // 线程退出后 bgm_running 自动变为 false（线程末尾设置）
+        // 绾跨▼閫€鍑哄悗 bgm_running 鑷姩鍙樹负 false锛堢嚎绋嬫湯灏捐缃級
         self.bgm_running.store(false, Ordering::Release);
     }
 
@@ -368,9 +369,9 @@ impl Drop for AudioEngine {
     fn drop(&mut self) { self.stop(); }
 }
 
-/// 三线程音频循环入口
+/// 涓夌嚎绋嬮煶棰戝惊鐜叆鍙?
 ///
-/// 架构：capture_thread → ring A → dsp_thread → ring B → render_thread
+/// 鏋舵瀯锛歝apture_thread 鈫?ring A 鈫?dsp_thread 鈫?ring B 鈫?render_thread
 #[allow(clippy::too_many_arguments)]
 fn audio_loop(
     running: Arc<AtomicBool>,
@@ -400,7 +401,7 @@ fn audio_loop(
     let input_id = input_device_name.unwrap_or_default();
     let output_id = output_device_name.unwrap_or_default();
 
-    // ── 在主线程预加载模型（参考 noisegate-ref）──
+    // 鈹€鈹€ 鍦ㄤ富绾跨▼棰勫姞杞芥ā鍨嬶紙鍙傝€?noisegate-ref锛夆攢鈹€
     let mut denoise = denoise::create_model(model_name.as_deref().unwrap_or("RNNoise"), resource_dir.as_deref());
     let current_model_name = denoise.name().to_string();
     if let Ok(states_lock) = saved_model_states.lock() {
@@ -411,13 +412,13 @@ fn audio_loop(
     }
     log::info!("Using denoise model: {}", current_model_name);
 
-    // ── 创建 ring buffers ──
+    // 鈹€鈹€ 鍒涘缓 ring buffers 鈹€鈹€
     let (prod_a, cons_a) = HeapRb::<Frame>::new(RING_FRAMES).split();
     let (prod_b, cons_b) = HeapRb::<Frame>::new(RING_FRAMES).split();
 
-    // ── 启动顺序：DSP → capture → render ──
+    // 鈹€鈹€ 鍚姩椤哄簭锛欴SP 鈫?capture 鈫?render 鈹€鈹€
 
-    // ── 1. 启动 DSP 线程（模型已预加载）──
+    // 鈹€鈹€ 1. 鍚姩 DSP 绾跨▼锛堟ā鍨嬪凡棰勫姞杞斤級鈹€鈹€
     let running_dsp = running.clone();
     let config_dsp = config.clone();
     let eq_config_dsp = eq_config.clone();
@@ -452,7 +453,7 @@ fn audio_loop(
         })
         .map_err(|e| format!("Failed to spawn DSP thread: {}", e))?;
 
-    // ── 2. 启动 capture 线程 ──
+    // 鈹€鈹€ 2. 鍚姩 capture 绾跨▼ 鈹€鈹€
     struct CaptureSink {
         prod: ringbuf::CachingProd<Arc<HeapRb<Frame>>>,
     }
@@ -467,7 +468,7 @@ fn audio_loop(
         &input_id, Box::new(CaptureSink { prod: prod_a }),
     ).map_err(|e| format!("Failed to start capture: {}", e))?;
 
-    // ── 3. 启动 render 线程 ──
+    // 鈹€鈹€ 3. 鍚姩 render 绾跨▼ 鈹€鈹€
     struct RenderSource {
         cons: ringbuf::CachingCons<Arc<HeapRb<Frame>>>,
     }
@@ -478,19 +479,19 @@ fn audio_loop(
         &output_id, Box::new(RenderSource { cons: cons_b }),
     ).map_err(|e| format!("Failed to start render: {}", e))?;
 
-    // ── 主线程等待退出 ──
+    // 鈹€鈹€ 涓荤嚎绋嬬瓑寰呴€€鍑?鈹€鈹€
     let _ = dsp_handle.join();
 
-    // drop capture 和 render（触发各自的线程退出）
+    // drop capture 鍜?render锛堣Е鍙戝悇鑷殑绾跨▼閫€鍑猴級
     drop(capture);
     drop(render);
 
-    // 保存模型状态（在 drop capture 之后，确保模型已用完）
+    // 淇濆瓨妯″瀷鐘舵€侊紙鍦?drop capture 涔嬪悗锛岀‘淇濇ā鍨嬪凡鐢ㄥ畬锛?
     flush_debug_log();
     Ok(())
 }
 
-/// DSP 线程：从 ring A 拉取 f32 mono 帧 → 处理 → 推入 ring B
+/// DSP 绾跨▼锛氫粠 ring A 鎷夊彇 f32 mono 甯?鈫?澶勭悊 鈫?鎺ㄥ叆 ring B
 fn dsp_thread(
     running: Arc<AtomicBool>,
     mut cons_a: ringbuf::CachingCons<Arc<HeapRb<Frame>>>,
@@ -517,7 +518,7 @@ fn dsp_thread(
     let mut current_model_name = current_model_name.to_string();
     debug_log(&format!("DSP thread: model={}", current_model_name));
 
-    // EQ 初始化
+    // EQ 鍒濆鍖?
     let mut eq_processor = crate::eq::EqProcessor::new(48000);
     let mut last_eq_config: Option<EqConfig> = None;
     let current_eq_config = eq_config.read().clone();
@@ -527,7 +528,7 @@ fn dsp_thread(
         last_eq_config = Some(current_eq_config.clone());
     }
 
-    // 监听设备：延迟初始化
+    // 鐩戝惉璁惧锛氬欢杩熷垵濮嬪寲
     let mut monitor = crate::audio_init::MonitorState {
         client: None, render: None, event: None,
         sample_rate: 0, channels: 2, bits_per_sample: 32,
@@ -537,50 +538,57 @@ fn dsp_thread(
     let mut mon_was_enabled = false;
     let mut resample_buf: Vec<f32> = vec![0.0; FRAME_SIZE * 2];
 
-    // 爆炸模式音频状态
+    // 鐖嗙偢妯″紡闊抽鐘舵€?
     let mut explode_audio = ExplodeAudioState::new();
 
     let mut last_strength: f32 = -1.0;
     let mut frame_count: u64 = 0;
     let mut frames_dropped: u64 = 0;
+
+    // 频谱累积：每 4 帧（40ms）计算一次，提高频率分辨率到 ~25Hz/bin
+    const SPECTRUM_ACC_FRAMES: usize = 4;
+    let mut spectrum_acc_in: Vec<f32> = vec![0.0; FRAME_SIZE * SPECTRUM_ACC_FRAMES];
+    let mut spectrum_acc_out: Vec<f32> = vec![0.0; FRAME_SIZE * SPECTRUM_ACC_FRAMES];
+    let mut spectrum_acc_idx: usize = 0;
+
     let mut bgm_buf: Vec<f32> = Vec::new();
     let mut bgm_read_pos: usize = 0;
     let mut stats_start = std::time::Instant::now();
 
-    // DSP 模块
+    // DSP 妯″潡
     let mut hpf = crate::dsp::hpf::HighPassFilter::default_48k();
     let mut limiter = crate::dsp::limiter::SoftLimiter::default_limiter();
     let mut noise_gate = crate::dsp::noise_gate::NoiseGate::new(0.01);
 
-    // 打印初始配置
+    // 鎵撳嵃鍒濆閰嶇疆
     let init_config = config.read().clone();
     debug_log(&format!("DSP_INIT: model={} enabled={} strength={} suppress={} mic_gain={} agc={} agc_target={} eq={} explode={} bgm={}",
         current_model_name, init_config.enabled, init_config.strength, init_config.suppress_level, init_config.mic_gain,
         init_config.agc_enabled, init_config.agc_target,
         eq_config.read().enabled, explode_enabled.load(Ordering::Relaxed), bgm_running.load(Ordering::Relaxed)));
 
-    // AGC 状态
+    // AGC 鐘舵€?
     let mut agc = crate::agc::AgcState::new();
     let mut last_agc_enabled = init_config.agc_enabled;
 
     while running.load(Ordering::Acquire) {
-        // 检查模型热切换请求（非阻塞，模型已在后台线程创建好）
+        // 妫€鏌ユā鍨嬬儹鍒囨崲璇锋眰锛堥潪闃诲锛屾ā鍨嬪凡鍦ㄥ悗鍙扮嚎绋嬪垱寤哄ソ锛?
         if let Ok((new_model_name, mut new_model)) = model_switch_receiver.try_recv() {
             debug_log(&format!("MODEL_SWITCH: {} -> {}", current_model_name, new_model_name));
-            // 保存旧模型状态
+            // 淇濆瓨鏃фā鍨嬬姸鎬?
             if let Some(state) = denoise.save_state() {
                 if let Ok(mut states) = saved_model_states.lock() {
                     states.insert(current_model_name.clone(), state);
                 }
             }
-            // 尝试加载旧模型状态（仅同类型模型兼容）
+            // 灏濊瘯鍔犺浇鏃фā鍨嬬姸鎬侊紙浠呭悓绫诲瀷妯″瀷鍏煎锛?
             if let Ok(states) = saved_model_states.lock() {
                 if let Some(state) = states.get(&new_model_name) {
                     new_model.load_state(state);
                     debug_log(&format!("MODEL_SWITCH: restored state for {}", new_model_name));
                 }
             }
-            // 应用当前 strength 设置
+            // 搴旂敤褰撳墠 strength 璁剧疆
             let current_config = config.read().clone();
             new_model.update_strength(current_config.strength);
             denoise = new_model;
@@ -588,7 +596,7 @@ fn dsp_thread(
             debug_log(&format!("MODEL_SWITCH: now using {}", current_model_name));
         }
 
-        // 从 ring A 拉取帧
+        // 浠?ring A 鎷夊彇甯?
         let mut frame = match cons_a.try_pop() {
             Some(f) => f,
             None => {
@@ -600,13 +608,13 @@ fn dsp_thread(
         frame_count += 1;
         let current_config = config.read().clone();
 
-        // DeepFilterNet strength 更新
+        // DeepFilterNet strength 鏇存柊
         if (current_config.strength - last_strength).abs() > f32::EPSILON {
             denoise.update_strength(current_config.strength);
             last_strength = current_config.strength;
         }
 
-        // EQ 配置更新
+        // EQ 閰嶇疆鏇存柊
         if eq_config_dirty.load(Ordering::Acquire) {
             let new_eq = eq_config.read().clone();
             eq_processor.apply_config(&new_eq);
@@ -614,24 +622,24 @@ fn dsp_thread(
             eq_config_dirty.store(false, Ordering::Release);
         }
 
-        // 保存原始输入用于频谱/电平统计（normalized f32 [-1.0, 1.0]）
+        // 淇濆瓨鍘熷杈撳叆鐢ㄤ簬棰戣氨/鐢靛钩缁熻锛坣ormalized f32 [-1.0, 1.0]锛?
         let input_frame = frame;
 
-        // ── 监听点 1：原始输入 ──
+        // 鈹€鈹€ 鐩戝惉鐐?1锛氬師濮嬭緭鍏?鈹€鈹€
         let mon_enabled = monitor_enabled.load(Ordering::Acquire);
         let mon_point = monitor_point.load(Ordering::Relaxed);
         monitor_write!(monitor, 1, mon_point, mon_enabled, &input_frame, &mut resample_buf);
 
-        // ── 1. 降噪 ──
+        // 鈹€鈹€ 1. 闄嶅櫔 鈹€鈹€
         if current_config.enabled {
             denoise.process_frame(&mut frame, &input_frame);
 
-            // NaN 检查
+            // NaN 妫€鏌?
             for sample in frame.iter_mut() {
                 if !sample.is_finite() { *sample = 0.0; }
             }
 
-            // 每 500 帧打印一次完整状态（仅开发环境）
+            // 姣?500 甯ф墦鍗颁竴娆″畬鏁寸姸鎬侊紙浠呭紑鍙戠幆澧冿級
             if frame_count % 500 == 1 {
                 let in_peak = input_frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
                 let out_peak = frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
@@ -642,14 +650,14 @@ fn dsp_thread(
                 ));
             }
 
-            // Strength mixing（normalized 范围）
+            // Strength mixing锛坣ormalized 鑼冨洿锛?
             if current_config.strength < 1.0 && !denoise.has_internal_strength_control() {
                 for (denoised, &original) in frame.iter_mut().zip(input_frame.iter()) {
                     *denoised = original * (1.0 - current_config.strength) + *denoised * current_config.strength;
                 }
             }
 
-            // 噪声门（仅 RNNoise，DeepFilterNet3 不需要）
+            // 鍣０闂紙浠?RNNoise锛孌eepFilterNet3 涓嶉渶瑕侊級
             if !denoise.has_internal_strength_control() && current_config.suppress_level > 0.01 {
                 let threshold = 0.001 + current_config.suppress_level * 0.009;
                 noise_gate.set_threshold(threshold);
@@ -662,12 +670,12 @@ fn dsp_thread(
             }
         }
 
-        // ── 监听点 2：降噪后 ──
+        // 鈹€鈹€ 鐩戝惉鐐?2锛氶檷鍣悗 鈹€鈹€
         monitor_write!(monitor, 2, mon_point, mon_enabled, &frame, &mut resample_buf);
 
-        // ── 2. 增益（手动 or AGC 自动）──
+        // 鈹€鈹€ 2. 澧炵泭锛堟墜鍔?or AGC 鑷姩锛夆攢鈹€
         if current_config.agc_enabled {
-            // AGC 自动模式：检测模式切换时重置状态
+            // AGC 鑷姩妯″紡锛氭娴嬫ā寮忓垏鎹㈡椂閲嶇疆鐘舵€?
             if !last_agc_enabled {
                 agc.reset();
                 last_agc_enabled = true;
@@ -678,10 +686,10 @@ fn dsp_thread(
             for sample in frame.iter_mut() { *sample *= current_config.mic_gain; }
         }
 
-        // ── 监听点 3：增益后 ──
+        // 鈹€鈹€ 鐩戝惉鐐?3锛氬鐩婂悗 鈹€鈹€
         monitor_write!(monitor, 3, mon_point, mon_enabled, &frame, &mut resample_buf);
 
-        // ── 3. EQ（带噪声门：信号极小时跳过 EQ，防止 biquad 放大噪声底）──
+        // 鈹€鈹€ 3. EQ锛堝甫鍣０闂細淇″彿鏋佸皬鏃惰烦杩?EQ锛岄槻姝?biquad 鏀惧ぇ鍣０搴曪級鈹€鈹€
         if last_eq_config.as_ref().map_or(false, |c| c.enabled) {
             let eq_input_peak = frame.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
             if eq_input_peak > 0.001 {
@@ -690,27 +698,27 @@ fn dsp_thread(
                     if !sample.is_finite() || sample.abs() < 1e-10 { *sample = 0.0; }
                 }
             } else {
-                // 信号极小时重置 EQ 状态，防止累积
+                // 淇″彿鏋佸皬鏃堕噸缃?EQ 鐘舵€侊紝闃叉绱Н
                 eq_processor.reset_all();
             }
         }
 
-        // ── 监听点 4：EQ 后 ──
+        // 鈹€鈹€ 鐩戝惉鐐?4锛欵Q 鍚?鈹€鈹€
         monitor_write!(monitor, 4, mon_point, mon_enabled, &frame, &mut resample_buf);
 
-        // ── 4. BGM 混音 ──
+        // 鈹€鈹€ 4. BGM 娣烽煶 鈹€鈹€
         if bgm_running.load(Ordering::Acquire) {
             while let Ok(data) = bgm_receiver.try_recv() {
                 for &sample in &data {
                     bgm_buf.push(sample as f32 / 32768.0);
                 }
             }
-            // 溢出保护：已消费部分超过一半时 compact
+            // 婧㈠嚭淇濇姢锛氬凡娑堣垂閮ㄥ垎瓒呰繃涓€鍗婃椂 compact
             if bgm_read_pos > bgm_buf.len() / 2 && bgm_read_pos > 0 {
                 bgm_buf.drain(..bgm_read_pos);
                 bgm_read_pos = 0;
             }
-            // 硬上限：堆积过多时丢弃最旧数据
+            // 纭笂闄愶細鍫嗙Н杩囧鏃朵涪寮冩渶鏃ф暟鎹?
             let max_bgm = FRAME_SIZE * 20;
             if bgm_buf.len() > max_bgm {
                 let excess = bgm_buf.len() - max_bgm;
@@ -736,7 +744,7 @@ fn dsp_thread(
             }
         }
 
-        // ── 5. 爆炸模式（模块内部用 i16 范围常量，需转换）──
+        // 鈹€鈹€ 5. 鐖嗙偢妯″紡锛堟ā鍧楀唴閮ㄧ敤 i16 鑼冨洿甯搁噺锛岄渶杞崲锛夆攢鈹€
         if explode_enabled.load(Ordering::Acquire) {
             let mut scaled = [0.0f32; FRAME_SIZE];
             for (i, &s) in frame.iter().enumerate() { scaled[i] = s * 32767.0; }
@@ -745,7 +753,7 @@ fn dsp_thread(
             for (i, &s) in output.iter().enumerate() { frame[i] = s / 32767.0; }
         }
 
-        // ── 6. Soft limiter（炸麦模式下跳过压缩，只做 NaN 检查）──
+        // 鈹€鈹€ 6. Soft limiter锛堢偢楹︽ā寮忎笅璺宠繃鍘嬬缉锛屽彧鍋?NaN 妫€鏌ワ級鈹€鈹€
         if !explode_enabled.load(Ordering::Acquire) {
             limiter.process(&mut frame);
         } else {
@@ -754,15 +762,15 @@ fn dsp_thread(
             }
         }
 
-        // ── 6.5 高通滤波器（80Hz，切除次声波）──
+        // 鈹€鈹€ 6.5 楂橀€氭护娉㈠櫒锛?0Hz锛屽垏闄ゆ澹版尝锛夆攢鈹€
         hpf.process(&mut frame);
 
-        // ── 监听点 5：最终输出（limiter 后）──
+        // 鈹€鈹€ 鐩戝惉鐐?5锛氭渶缁堣緭鍑猴紙limiter 鍚庯級鈹€鈹€
         monitor_write!(monitor, 5, mon_point, mon_enabled, &frame, &mut resample_buf);
 
-        // 监听流启停控制
+        // 鐩戝惉娴佸惎鍋滄帶鍒?
         if mon_enabled {
-            // 延迟初始化
+            // 寤惰繜鍒濆鍖?
             if !mon_was_enabled {
                 monitor = init_monitor(&String::new(), 48000, FRAME_SIZE);
                 mon_was_enabled = true;
@@ -795,9 +803,9 @@ fn dsp_thread(
             mon_was_enabled = false;
         }
 
-        // ── 8. 统计更新（每 5 帧） ──
+        // 鈹€鈹€ 8. 缁熻鏇存柊锛堟瘡 5 甯э級 鈹€鈹€
         if frame_count % 5 == 0 {
-            // 帧数据是 normalized f32 [-1.0, 1.0]，参考值 1.0
+            // 甯ф暟鎹槸 normalized f32 [-1.0, 1.0]锛屽弬鑰冨€?1.0
             let input_rms = calculate_rms(&input_frame);
             let output_rms = calculate_rms(&frame);
             let input_level_db = if input_rms > 1e-10 {
@@ -811,33 +819,50 @@ fn dsp_thread(
                 -100.0
             };
 
-            // compute_spectrum_into 期望 i16 范围，缩放后计算
-            let mut scaled_input = [0.0f32; FRAME_SIZE];
-            for (i, &s) in input_frame.iter().enumerate() {
-                scaled_input[i] = s * 32767.0;
-            }
-            let mut spectrum_buf = [0.0f32; 32];
-            compute_spectrum_into(&scaled_input, &mut spectrum_buf);
+            // 频谱累积：每 SPECTRUM_ACC_FRAMES 帧计算一次
+            let acc_offset = spectrum_acc_idx * FRAME_SIZE;
+            let acc_len = FRAME_SIZE * SPECTRUM_ACC_FRAMES;
+            spectrum_acc_in[acc_offset..acc_offset + FRAME_SIZE].copy_from_slice(&input_frame);
+            spectrum_acc_out[acc_offset..acc_offset + FRAME_SIZE].copy_from_slice(&frame);
+            spectrum_acc_idx += 1;
 
-            let mut s = stats.write();
-            s.input_level = input_level_db;
-            s.output_level = output_level_db;
-            s.noise_reduction_db = input_level_db - output_level_db;
-            s.latency_ms = 10.0 + 10.0; // capture buffer + render buffer ≈ 20ms
-            s.frames_processed = frame_count;
-            s.frames_dropped = frames_dropped;
-            s.spectrum.copy_from_slice(&spectrum_buf);
+            if spectrum_acc_idx >= SPECTRUM_ACC_FRAMES {
+                spectrum_acc_idx = 0;
+                let mut spectrum_buf = vec![0.0f32; 64];
+                compute_spectrum_into(&spectrum_acc_in[..acc_len], &mut spectrum_buf);
+                let mut spectrum_out_buf = vec![0.0f32; 64];
+                compute_spectrum_into(&spectrum_acc_out[..acc_len], &mut spectrum_out_buf);
+
+                let mut s = stats.write();
+                s.input_level = input_level_db;
+                s.output_level = output_level_db;
+                s.noise_reduction_db = input_level_db - output_level_db;
+                s.latency_ms = 10.0 + 10.0;
+                s.frames_processed = frame_count;
+                s.frames_dropped = frames_dropped;
+                s.spectrum = spectrum_buf.clone();
+                s.spectrum_out = spectrum_out_buf.clone();
+            } else {
+                // 累积未满时仍更新电平
+                let mut s = stats.write();
+                s.input_level = input_level_db;
+                s.output_level = output_level_db;
+                s.noise_reduction_db = input_level_db - output_level_db;
+                s.latency_ms = 10.0 + 10.0;
+                s.frames_processed = frame_count;
+                s.frames_dropped = frames_dropped;
+            }
         }
 
-        // ── 9. 推入 ring B ──
+        // 鈹€鈹€ 9. 鎺ㄥ叆 ring B 鈹€鈹€
         if prod_b.try_push(frame).is_err() {
-            // 前 100 帧是启动预热期（render 初始化等），不计入丢帧统计
+            // 鍓?100 甯ф槸鍚姩棰勭儹鏈燂紙render 鍒濆鍖栫瓑锛夛紝涓嶈鍏ヤ涪甯х粺璁?
             if frame_count > 100 {
                 frames_dropped += 1;
             }
         }
 
-        // ── 10. 健康统计 ──
+        // 鈹€鈹€ 10. 鍋ュ悍缁熻 鈹€鈹€
         if stats_start.elapsed().as_secs() >= 5 {
             let drop_rate = frames_dropped as f64 / frame_count as f64 * 100.0;
             debug_log(&format!("HEALTH: frame={} dropped={} ({:.2}%)", frame_count, frames_dropped, drop_rate));
@@ -846,7 +871,7 @@ fn dsp_thread(
         }
     }
 
-    // 保存模型状态
+    // 淇濆瓨妯″瀷鐘舵€?
     if let Some(s) = denoise.save_state() {
         if let Ok(mut states_lock) = saved_model_states.lock() {
             states_lock.insert(current_model_name, s);

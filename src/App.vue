@@ -879,7 +879,7 @@ onUnmounted(() => {
           <AudioMeter :label="t('stats.input')" :level="stats.input_level" />
           <AudioMeter :label="t('stats.output')" :level="stats.output_level" />
         </div>
-        <SpectrumVisualizer :data="stats.spectrum" />
+        <SpectrumVisualizer :data="stats.spectrum" :dataOut="stats.spectrum_out" />
       </section>
 
       <section class="section stats-bar">
