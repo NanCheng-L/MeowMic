@@ -193,6 +193,9 @@ scripts/                # 构建/发布辅助脚本
 - **帧处理积压限制**：每次迭代最多处理 2 帧，积压超过时跳过旧帧。否则处理慢时输入缓冲区溢出，导致持续卡顿
 - **丢帧计数预热期**：启动前 1000 帧（约 10 秒）不计入丢帧计数，跳过 WASAPI 初始化、模型加载、EQ 配置等延迟
 - **debug_log try_lock**：音频线程用 `Mutex::try_lock()` 而非 `lock()`，拿不到锁就丢弃日志，避免阻塞。BufWriter 8KB 缓冲区满时同步磁盘 I/O 会阻塞数毫秒
+- **debug_log 不在 engine 锁内调用**：Tauri 命令中 `state.engine.lock()` 持有 `std::sync::Mutex` 期间不能调用 `debug_log()`（涉及文件 I/O），否则与 `get_audio_stats` 轮询（每 200ms）竞争同一把锁导致互相阻塞。必须用内部作用域 `{ let engine = ...; }` 释放锁后再 `debug_log`
+- **爆炸模式 intensity 范围 1-100**：前端传给 `set_explode_mode` 的 intensity 参数必须是 1-100 整数（对应百分比滑块值），不能乘 100。Rust 端 `process_explode_into` 用 `.clamp(1.0, 100.0)` 防御性限制。传入过大值（如 8000）会导致经典效果 `clip` 计算为负数，`f32::clamp(min, max)` 因 min > max panic，DSP 线程崩溃
+- **热键处理器用 fire-and-forget**：全局快捷键事件监听器中的 `invoke` 调用应改为 `.then()` 链式调用而非 `await`，避免阻塞前端事件循环导致 UI 冻结
 - **AudioStats.spectrum 不用 Vec**：`[f32; 32].to_vec()` 每 5 帧堆分配 128 字节，长期运行导致堆碎片化。改为 `[f32; 32]` 固定数组 + `copy_from_slice()`
 - **模型必须在主线程预加载**：`denoise::create_model()` 必须在 `audio_loop` 中、spawn DSP 线程之前调用。在 DSP 线程内部加载模型会导致启动时原始音频直通产生回声（模型加载期间 capture 帧堆积，DSP 开始处理后时序混乱）。参考 noisegate-ref：模型在主线程加载完再启动管线
 - **启动顺序 DSP → capture → render**：必须和 noisegate-ref 一致。先启动 render 会导致预填充静音后等待时间过长，先启动 capture 会导致帧堆积。DSP 线程先 spawn 并等待数据，capture 启动后立即被消费
