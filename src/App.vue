@@ -623,14 +623,22 @@ onMounted(async () => {
 
   // 监听炸麦快捷键
   unlistenExplode = await listen('toggle-explode', async () => {
+    console.log('[HOTKEY] toggle-explode fired, current:', explodeEnabled.value)
     const next = !explodeEnabled.value
     explodeEnabled.value = next
-    try {
-      await invoke('set_explode_mode', { enabled: next, intensity: Math.round(explodeIntensity.value * 100) })
-    } catch (e) {
-      console.error('Failed to set explode mode:', e)
-    }
-    saveConfig()
+    // fire-and-forget: �������¼�ѭ��
+    invoke('set_explode_mode', { enabled: next, intensity: explodeIntensity.value })
+      .then(() => {
+        console.log('[HOTKEY] set_explode_mode done')
+        if (next) {
+          const savedEffect = parseInt(localStorage.getItem('meowmic-explode-effect') || '0', 10)
+          console.log('[HOTKEY] calling set_explode_effect, effect:', savedEffect)
+          return invoke('set_explode_effect', { effect: savedEffect })
+        }
+      })
+      .then(() => console.log('[HOTKEY] explode commands done'))
+      .catch(e => console.error('[HOTKEY] Failed to set explode mode:', e))
+      .finally(() => saveConfig())
   })
 
   // 监听监听快捷键

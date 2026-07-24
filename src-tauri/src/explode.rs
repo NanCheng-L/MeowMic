@@ -102,7 +102,7 @@ pub fn process_explode_into(samples: &[f32], output: &mut [f32], state: &Explode
         return;
     }
 
-    let intensity = state.intensity.load(Ordering::Relaxed) as f32;
+    let intensity = (state.intensity.load(Ordering::Relaxed) as f32).clamp(1.0, 100.0);
     let effect_type = state.effect_type.load(Ordering::Relaxed);
 
     // 效果切换时清空延迟线

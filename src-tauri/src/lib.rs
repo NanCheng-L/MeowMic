@@ -153,29 +153,33 @@ fn update_denoise_config(
     agc_enabled: Option<bool>,
     agc_target: Option<f32>,
 ) -> Result<(), String> {
-    let engine = state.engine.lock();
-    let mut config = engine.get_config();
-    if let Some(e) = enabled {
-        config.enabled = e;
-    }
-    if let Some(s) = strength {
-        config.strength = s.clamp(0.0, 1.0);
-    }
-    if let Some(g) = mic_gain {
-        config.mic_gain = g.clamp(0.5, 10.0);
-    }
-    if let Some(sl) = suppress_level {
-        config.suppress_level = sl.clamp(0.0, 1.0);
-    }
-    if let Some(a) = agc_enabled {
-        config.agc_enabled = a;
-    }
-    if let Some(t) = agc_target {
-        config.agc_target = t.clamp(0.01, 1.0);
-    }
+    let mut config;
+    {
+        let engine = state.engine.lock();
+        config = engine.get_config();
+        if let Some(e) = enabled {
+            config.enabled = e;
+        }
+        if let Some(s) = strength {
+            config.strength = s.clamp(0.0, 1.0);
+        }
+        if let Some(g) = mic_gain {
+            config.mic_gain = g.clamp(0.5, 10.0);
+        }
+        if let Some(sl) = suppress_level {
+            config.suppress_level = sl.clamp(0.0, 1.0);
+        }
+        if let Some(a) = agc_enabled {
+            config.agc_enabled = a;
+        }
+        if let Some(t) = agc_target {
+            config.agc_target = t.clamp(0.01, 1.0);
+        }
+        engine.update_config(config.clone());
+    } // release lock before debug_log
     debug_log(&format!("CONFIG_UPDATE: enabled={} strength={:.2} mic_gain={:.2} suppress={:.2} agc={} agc_target={:.4}",
-        config.enabled, config.strength, config.mic_gain, config.suppress_level, config.agc_enabled, config.agc_target));
-    engine.update_config(config);
+        config.enabled, config.strength, config.mic_gain, config.suppress_level, config.agc_enabled, config.agc_target)
+);
     Ok(())
 }
 
@@ -409,19 +413,23 @@ fn update_bgm_config(state: State<'_, EngineState>, bgm_gain: f32) -> Result<(),
 
 #[tauri::command]
 fn set_explode_mode(state: State<'_, EngineState>, enabled: bool, intensity: Option<u32>) -> Result<(), String> {
-    let engine = state.engine.lock();
-    engine.set_explode_mode(enabled);
-    if let Some(i) = intensity {
-        engine.set_explode_intensity(i);
-    }
+    {
+        let engine = state.engine.lock();
+        engine.set_explode_mode(enabled);
+        if let Some(i) = intensity {
+            engine.set_explode_intensity(i);
+        }
+    } // release lock before debug_log
     debug_log(&format!("EXPLODE_MODE: enabled={} intensity={:?}", enabled, intensity));
     Ok(())
 }
 
 #[tauri::command]
 fn set_explode_effect(state: State<'_, EngineState>, effect: u32) -> Result<(), String> {
-    let engine = state.engine.lock();
-    engine.set_explode_effect(ExplodeEffect::from_u32(effect));
+    {
+        let engine = state.engine.lock();
+        engine.set_explode_effect(ExplodeEffect::from_u32(effect));
+    } // release lock before debug_log
     debug_log(&format!("EXPLODE_EFFECT: effect={}", effect));
     Ok(())
 }
